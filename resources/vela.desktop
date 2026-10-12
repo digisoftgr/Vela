@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=Vela
+GenericName=File Manager
+Comment=A super fast, fully fledged file manager for KDE Plasma
+Exec=vela %u
+Icon=vela
+Categories=Qt;KDE;System;FileManager;
+MimeType=inode/directory;
+Keywords=file;manager;files;explorer;
+StartupNotify=true
+StartupWMClass=vela
+X-DBUS-ServiceName=org.kde.vela
+X-DBUS-StartupType=Unique

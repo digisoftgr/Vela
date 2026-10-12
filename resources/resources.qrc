@@ -1,0 +1,5 @@
+<RCC>
+    <qresource prefix="/">
+        <file>icons/vela.png</file>
+    </qresource>
+</RCC>

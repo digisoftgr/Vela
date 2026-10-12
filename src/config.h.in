@@ -1,0 +1,2 @@
+#pragma once
+#define VELA_VERSION "@PROJECT_VERSION@"

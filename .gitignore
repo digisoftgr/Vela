@@ -1,0 +1,19 @@
+# Build output
+/build/
+/build_release/
+
+# makepkg output
+/pkg/
+/*.pkg.tar.*
+
+# Editor / IDE / tooling
+/.claude/
+/.vscode/
+/.idea/
+*.user
+.directory
+
+# Private development notes
+/implementation_prompt.txt
+/ToDo.txt
+/ToRun.txt
