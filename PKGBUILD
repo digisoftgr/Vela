@@ -20,6 +20,7 @@ depends=(
     'ki18n'
     'kio'
     'kjobwidgets'
+    'kparts'
     'kservice'
     'kwidgetsaddons'
     'kxmlgui'
@@ -34,7 +35,7 @@ makedepends=(
 )
 optdepends=(
     'ark: compress and extract archives from the context menu'
-    'konsole: default terminal for "Open Terminal Here"'
+    'konsole: embedded terminal panel (F4) and default terminal for "Open Terminal Here"'
     'kio-extras: thumbnails and network protocols such as sftp and smb'
 )
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")

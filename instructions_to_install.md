@@ -17,7 +17,7 @@ These instructions cover **Arch Linux** and **Kubuntu**. Other distributions wor
    ```bash
    sudo pacman -S --needed git cmake extra-cmake-modules qt6-base qt6-tools \
        kbookmarks kcolorscheme kconfig kconfigwidgets kcoreaddons \
-       kglobalaccel kguiaddons ki18n kio kjobwidgets kservice \
+       kglobalaccel kguiaddons ki18n kio kjobwidgets kparts kservice \
        kwidgetsaddons kxmlgui solid syntax-highlighting poppler-qt6
    ```
    On Arch the KDE Frameworks 6 packages have no `kf6-` prefix.
@@ -44,7 +44,7 @@ Kubuntu **25.10 or newer** is required. Kubuntu 26.04 LTS ships KDE Frameworks 6
        libkf6bookmarks-dev libkf6colorscheme-dev libkf6config-dev \
        libkf6configwidgets-dev libkf6coreaddons-dev libkf6globalaccel-dev \
        libkf6guiaddons-dev libkf6i18n-dev libkf6jobwidgets-dev libkf6kio-dev \
-       libkf6service-dev libkf6solid-dev libkf6syntaxhighlighting-dev \
+       libkf6parts-dev libkf6service-dev libkf6solid-dev libkf6syntaxhighlighting-dev \
        libkf6widgetsaddons-dev libkf6xmlgui-dev libpoppler-qt6-dev
    ```
 
@@ -117,7 +117,7 @@ This removes every installed file. It leaves any empty folders behind. Your pack
 | Feature | Arch | Kubuntu |
 |---|---|---|
 | Compress and extract archives from the context menu | `ark` | `ark` |
-| Default terminal for "Open Terminal Here" | `konsole` | `konsole` |
+| Embedded terminal panel (F4), default terminal for "Open Terminal Here" | `konsole` | `konsole` |
 | More thumbnail types, network protocols (sftp, smb) | `kio-extras` | `kio-extras` |
 
 ## Troubleshooting
@@ -136,7 +136,7 @@ You need:
 
 - Qt 6 (Core, Widgets, Concurrent, DBus) development files
 - Extra CMake Modules 6
-- KDE Frameworks 6 development files for: Bookmarks, ColorScheme, Config, ConfigWidgets, CoreAddons, GlobalAccel, GuiAddons, I18n, JobWidgets, KIO, Service, Solid, SyntaxHighlighting, WidgetsAddons, XmlGui
+- KDE Frameworks 6 development files for: Bookmarks, ColorScheme, Config, ConfigWidgets, CoreAddons, GlobalAccel, GuiAddons, I18n, JobWidgets, KIO, Parts, Service, Solid, SyntaxHighlighting, WidgetsAddons, XmlGui
 - Poppler Qt 6 bindings
 - CMake 3.20 or newer and a C++17 compiler
 

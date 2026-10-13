@@ -28,6 +28,19 @@ Press **Space** on a selection to open or close the preview column. It follows t
 - **Text and source files** open in an **editor** with syntax highlighting (KSyntaxHighlighting). Save with Ctrl+S. Saving is atomic, line endings (LF or CRLF) are preserved, and a file that is not valid UTF-8 is opened read-only so a save cannot silently corrupt it.
 - **Everything else** gets an icon and metadata card.
 
+### Terminal panel
+
+Press **F4**, or click **Terminal** in the status bar, to open a terminal below the panels. It is Konsole, embedded, and follows the active panel:
+
+- **Two-way sync.** Changing folder in Vela runs `cd` in the shell, and `cd` in the shell moves the active panel. Toggle **Sync** in the terminal header to keep the two independent.
+- **Safe by default.** Vela only types into the shell when it is sitting at its own prompt. While a program runs, or inside ssh, tmux/screen, a container, or a shell of another user, sync pauses and the header says why. If the explorer moved in the meantime, **Sync Now** appears and becomes clickable once the prompt is back.
+- **Instant.** bash, zsh and fish are started with a small hook that reports the folder at each prompt, so a `cd` shows in Vela right away. Your own rc files still load as usual and are never modified; the hook files live in `$XDG_RUNTIME_DIR/vela/`. Other shells, or a Konsole profile with custom arguments, run unchanged and are checked twice a second instead.
+- **Remote folders** (sftp, smb, ...) pause sync. The terminal stays where it is.
+- **Hiding ends the shell**, along with anything running in it. The next F4 starts a fresh shell in the current folder.
+- **Unmount-aware.** Unmounting a device moves a shell sitting on it elsewhere, so it does not keep the device busy.
+
+Ctrl+Shift+F4 focuses the terminal. The panel's open state, height and sync setting are part of the restored session. The font and colours come from Konsole's profile (right-click in the terminal to edit it).
+
 ### File operations
 
 - Copy, cut, paste, rename (F2), trash (Delete), permanent delete (Shift+Delete), new folder (F7 or Ctrl+N for an auto-named one), new file (Ctrl+Alt+N) and properties, all through KIO.
@@ -75,6 +88,8 @@ All of these can be changed.
 | Quick filter | Just start typing |
 | Command palette | Ctrl+Shift+P |
 | Toggle sidebar | F9 |
+| Toggle terminal panel | F4 |
+| Focus terminal panel | Ctrl+Shift+F4 |
 | Show hidden files | Ctrl+H or Ctrl+. |
 | Open selection | Enter |
 | Rename | F2 |
@@ -114,7 +129,7 @@ To try Vela without installing it, run `bash run.sh` after a Debug configure. Th
 ## Optional packages
 
 - `ark`: compress and extract entries in the context menu.
-- `konsole`: the default terminal for "Open Terminal Here". Any other terminal works, set it in Settings.
+- `konsole`: the embedded terminal panel (F4), and the default terminal for "Open Terminal Here". Any other terminal works for the latter, set it in Settings.
 - `kio-extras`: more thumbnail types and network protocols (sftp, smb, ...).
 - A KDE Plasma session gives full icon theme and colour scheme integration. Vela also runs under other desktops, but looks best with Plasma's theme.
 
@@ -125,6 +140,7 @@ To try Vela without installing it, run `bash run.sh` after a Debug configure. Th
 - The text editor reloads a file when it changes on disk, **including over unsaved edits**. A banner tells you when it happens.
 - The global "focus window" shortcut must be assigned by hand.
 - No batch rename and no built-in archive handling, beyond the Ark integration.
+- The terminal panel decides whether the shell is at its prompt from `/proc`, using a list of known shells. An unlisted shell (or a renamed binary) pauses sync as if a program were running.
 
 ## Contributing
 
