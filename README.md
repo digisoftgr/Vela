@@ -4,7 +4,7 @@ Tabbed KDE Plasma file manager with built-in file and folder previews. Dolphin-c
 
 Vela is written in C++17 with Qt 6 and KDE Frameworks 6. It uses KIO for all file operations, so anything Dolphin can reach (local disks, removable media, sftp, smb, ...) works the same way. It shares Dolphin's Places and bookmarks.
 
-**Status:** version 0.7.2, pre-1.0. Expect rough edges and report them.
+**Status:** pre-1.0. Expect rough edges and report them. See [CHANGELOG.md](CHANGELOG.md) for what changed in each version.
 
 ## Features
 
