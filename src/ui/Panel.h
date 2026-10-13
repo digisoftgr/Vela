@@ -128,6 +128,9 @@ public:
 
     // Navigation
     void navigateTo(const QUrl &url);
+    // Same, but the listing does not pull keyboard focus into the view when it
+    // lands: navigation driven from elsewhere (the terminal panel).
+    void navigateToWithoutFocus(const QUrl &url);
     void navigateAndReveal(const QUrl &folder, const QUrl &fileToReveal);
     // Arm the post-load reveal without triggering navigation, for callers that
     // are about to load the directory themselves (e.g. a freshly created window
@@ -321,7 +324,8 @@ private Q_SLOTS:
     void onFilterSubdirToggled(bool on);
 
 private:
-    void loadUrl(const QUrl &url);
+    void navigate(const QUrl &url, bool takeFocus);
+    void loadUrl(const QUrl &url, bool takeFocus = true);
     // Re-lists the directory if `job` (a trash/delete whose rows were removed
     // optimistically) fails, so files it did not remove reappear.
     void reconcileAfterFailure(KJob *job);
@@ -522,6 +526,10 @@ private:
     // used by search-result navigation, create/paste, and Ctrl+N rename alike.
     QList<QUrl>   m_pendingUrls;
     PendingAction m_pendingAction = PendingAction::None;
+    // Whether the current load may focus the view when it lists. Set by every
+    // load, so a background navigation that never completes cannot leak into
+    // the next one.
+    bool m_takeFocusOnLoad = true;
 
     int m_searchResultCount = 0;
     // Bumped whenever the search results are replaced or dropped, so late

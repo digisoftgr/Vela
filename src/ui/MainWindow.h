@@ -22,6 +22,7 @@ class QToolButton;
 class QVBoxLayout;
 class SettingsDialog;
 class Sidebar;
+class TerminalPanel;
 class ViewModeSlider;
 
 class MainWindow : public KXmlGuiWindow
@@ -156,6 +157,11 @@ private:
     void togglePreview();
     void setPreviewVisible(bool visible, int width = -1);
 
+    // The terminal below the panels (F4). One per window, following the active
+    // panel. Hiding it ends its shell. `height` < 0 uses the remembered height,
+    // or a third of the panels column the first time.
+    void setTerminalVisible(bool visible, int height = -1);
+
     static MainWindow *windowUnderCursor();
 
     QSplitter       *m_outerSplitter = nullptr;
@@ -164,6 +170,9 @@ private:
     Panel           *m_activePanel   = nullptr;
     PanelContainer  *m_panelRoot     = nullptr;
     PreviewPane     *m_preview       = nullptr;
+    QSplitter       *m_terminalSplitter = nullptr; // panels above, terminal below
+    TerminalPanel   *m_terminal      = nullptr;
+    int              m_terminalHeight = -1;        // last height while shown
 
     // ── Tab drag state ────────────────────────────────────────────────────────
     QList<DropZoneOverlay *> m_dragOverlays;   // overlays shown in THIS window as a drop target
@@ -239,6 +248,8 @@ private:
     QAction *m_actionNewFolder       = nullptr;
     QAction *m_actionUndo            = nullptr;
     QAction *m_actionToggleSidebar   = nullptr;
+    QAction *m_actionToggleTerminal  = nullptr;
+    QAction *m_actionFocusTerminal   = nullptr;
     QAction *m_actionCommandPalette  = nullptr;
     // View ▸ Show Operations: the only way back to the Operations window once
     // it is running in the background. Disabled while nothing is listed.

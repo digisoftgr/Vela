@@ -21,6 +21,7 @@ set(VELA_SRCS
     ui/SettingsDialog.cpp
     ui/DropZoneOverlay.cpp
     ui/PanelContainer.cpp
+    ui/TerminalPanel.cpp
     ui/SortLockHeaderView.cpp
     ui/preview/PreviewPane.cpp
     ui/preview/PreviewContainer.cpp
@@ -51,6 +52,7 @@ target_link_libraries(vela
     KF6::ColorScheme
     KF6::SyntaxHighlighting
     KF6::Service    # KApplicationTrader / KSycoca (default file manager setting)
+    KF6::Parts      # embedded terminal (konsolepart)
     Poppler::Qt6
 )
 

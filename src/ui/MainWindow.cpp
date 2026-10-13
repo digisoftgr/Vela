@@ -9,6 +9,7 @@
 #include "MountWatcher.h"
 #include "SettingsDialog.h"
 #include "Sidebar.h"
+#include "TerminalPanel.h"
 #include "ViewModeSlider.h"
 #include "core/CommandRegistry.h"
 #include "core/FileItemModelBase.h"
@@ -292,8 +293,44 @@ void MainWindow::setupUI()
     panelsLayout->setContentsMargins(0, 0, 0, 0);
     panelsLayout->setSpacing(0);
 
-    m_panelRoot = new PanelContainer(m_leftPanel, panelsContainer);
-    panelsLayout->addWidget(m_panelRoot, 1);
+    // Panels above, terminal below — inside the panels column, so the sidebar
+    // and the preview column keep the full height.
+    m_terminalSplitter = new QSplitter(Qt::Vertical, panelsContainer);
+    m_terminalSplitter->setChildrenCollapsible(false);
+    m_panelRoot = new PanelContainer(m_leftPanel, m_terminalSplitter);
+    m_terminal = new TerminalPanel(m_terminalSplitter);
+    m_terminal->setMinimumHeight(80);
+    m_terminal->hide();
+    m_terminalSplitter->addWidget(m_panelRoot);
+    m_terminalSplitter->addWidget(m_terminal);
+    m_terminalSplitter->setStretchFactor(0, 1);
+    m_terminalSplitter->setStretchFactor(1, 0);
+    panelsLayout->addWidget(m_terminalSplitter, 1);
+    connect(m_terminalSplitter, &QSplitter::splitterMoved, this, [this]() {
+        if (m_terminal->isVisible())
+            m_terminalHeight = m_terminalSplitter->sizes().value(1, m_terminalHeight);
+        scheduleSessionSave(SaveScope::GeometryOnly);
+    });
+
+    // F4 and Ctrl+Shift+F4 must work from inside the terminal too.
+    m_terminal->setPassthroughActions({m_actionToggleTerminal, m_actionFocusTerminal});
+    connect(m_terminal, &TerminalPanel::navigateRequested, this, [this](const QUrl &url) {
+        // Focus stays where it is: typing in the terminal goes on there.
+        if (Panel *p = activePanel())
+            p->navigateToWithoutFocus(url);
+    });
+    // A finished command (mkdir, rm, …) shows at once, not after KIO's ~700 ms.
+    // Every panel: the command may have touched the other panel's folder too.
+    connect(m_terminal, &TerminalPanel::promptReturned, this, [this]() {
+        for (Panel *p : m_panelRoot->allPanels())
+            p->model()->refreshSoon();
+    });
+    connect(m_terminal, &TerminalPanel::shellExited, this, [this]() {
+        m_actionToggleTerminal->setChecked(false); // `exit` closes the panel
+    });
+    connect(m_terminal, &TerminalPanel::syncEnabledChanged, this, [this]() {
+        scheduleSessionSave();
+    });
 
     m_preview = new PreviewPane(m_outerSplitter);
     m_preview->hide();
@@ -341,6 +378,7 @@ void MainWindow::setupUI()
     bottomLayout->addWidget(m_statusBarArea, 1);
 
     m_viewModeSlider = new ViewModeSlider(bottomBar);
+    m_viewModeSlider->setTerminalAction(m_actionToggleTerminal);
     bottomLayout->addWidget(m_viewModeSlider);
     // Active panel only — the same rule as Ctrl+wheel, the context menu and
     // the view-mode actions. The slider tracks whichever panel is active.
@@ -540,6 +578,27 @@ void MainWindow::setupActions()
     connect(m_actionNewFolder, &QAction::triggered, this, [this]() {
         if (Panel *p = actionPanel())
             p->createNewFolder();
+    });
+
+    // Dolphin's keys: F4 shows/hides, Ctrl+Shift+F4 focuses (showing it first).
+    m_actionToggleTerminal = new QAction(QIcon::fromTheme(QStringLiteral("utilities-terminal")),
+                                         i18n("Show Terminal"), this);
+    m_actionToggleTerminal->setCheckable(true);
+    actionCollection()->addAction(QStringLiteral("toggle_terminal"), m_actionToggleTerminal);
+    actionCollection()->setDefaultShortcut(m_actionToggleTerminal, Qt::Key_F4);
+    connect(m_actionToggleTerminal, &QAction::toggled, this, [this](bool visible) {
+        setTerminalVisible(visible);
+    });
+
+    m_actionFocusTerminal = new QAction(QIcon::fromTheme(QStringLiteral("utilities-terminal")),
+                                        i18n("Focus Terminal"), this);
+    actionCollection()->addAction(QStringLiteral("focus_terminal"), m_actionFocusTerminal);
+    actionCollection()->setDefaultShortcut(m_actionFocusTerminal, Qt::CTRL | Qt::SHIFT | Qt::Key_F4);
+    connect(m_actionFocusTerminal, &QAction::triggered, this, [this]() {
+        if (!m_terminal->isVisible())
+            m_actionToggleTerminal->setChecked(true); // shows and focuses
+        else
+            m_terminal->focusTerminal();
     });
 
     m_actionToggleSidebar = new QAction(QIcon::fromTheme(QStringLiteral("view-sidetree")),
@@ -1173,6 +1232,8 @@ void MainWindow::setActivePanel(Panel *panel)
         m_viewModeSlider->setActivePanel(panel);
     if (m_preview)
         m_preview->setPanel(panel);
+    if (m_terminal && panel)
+        m_terminal->setExplorerUrl(panel->currentUrl());
 }
 
 void MainWindow::togglePreview()
@@ -1212,6 +1273,49 @@ void MainWindow::setPreviewVisible(bool visible, int width)
     scheduleSessionSave();
 }
 
+void MainWindow::setTerminalVisible(bool visible, int height)
+{
+    // The action is the one source of truth, so the bottom-bar button and F4
+    // agree whichever way the change came in (restore, `exit`): go through it,
+    // and come back here from its toggled().
+    if (m_actionToggleTerminal->isChecked() != visible) {
+        if (height > 0)
+            m_terminalHeight = height;
+        m_actionToggleTerminal->setChecked(visible);
+        return;
+    }
+
+    if (!visible) {
+        if (m_terminal->isHidden())
+            return;
+        m_terminalHeight = m_terminalSplitter->sizes().value(1, m_terminalHeight);
+        const bool hadFocus = m_terminal->isAncestorOf(QApplication::focusWidget());
+        m_terminal->stopShell(); // by design: hiding ends the shell and its jobs
+        m_terminal->hide();
+        if (hadFocus && m_activePanel)
+            m_activePanel->focusView();
+        scheduleSessionSave();
+        return;
+    }
+
+    if (m_terminal->isHidden()) {
+        const int total = m_terminalSplitter->height();
+        if (height > 0)
+            m_terminalHeight = height;
+        int h = m_terminalHeight > 0 ? m_terminalHeight : total / 3;
+        // Leave the panels at least as much room as the terminal needs itself.
+        h = qBound(m_terminal->minimumHeight(), h,
+                   qMax(total - m_terminal->minimumHeight(), m_terminal->minimumHeight()));
+        if (m_activePanel)
+            m_terminal->setExplorerUrl(m_activePanel->currentUrl());
+        m_terminal->show();
+        m_terminalSplitter->setSizes({total - h, h});
+        scheduleSessionSave();
+    }
+    m_terminal->startShell();
+    m_terminal->focusTerminal();
+}
+
 void MainWindow::connectPanel(Panel *panel)
 {
     connect(panel, &Panel::activated, this, [this, panel]() {
@@ -1222,8 +1326,10 @@ void MainWindow::connectPanel(Panel *panel)
     // as a load starts, so a mistyped address used to be recorded too.
     connect(panel, &Panel::directoryVisited, m_sidebar, &Sidebar::recordVisit);
     connect(panel, &Panel::urlChanged, this, [this, panel](const QUrl &url) {
-        if (panel == m_activePanel)
+        if (panel == m_activePanel) {
             m_sidebar->setCurrentUrl(url);
+            m_terminal->setExplorerUrl(url);
+        }
         // Debounced autosave so an unclean exit doesn't lose the session.
         scheduleSessionSave();
     });
@@ -1584,6 +1690,9 @@ void MainWindow::saveGeometryToGroup(KConfigGroup &group) const
     const QList<int> sizes = m_outerSplitter->sizes();
     group.writeEntry("OuterSplitterSizes", QList<int>{sizes.value(0), sizes.value(1)});
     group.writeEntry("PreviewWidth", m_preview->rememberedWidth(-1));
+    group.writeEntry("TerminalHeight", m_terminal->isVisible()
+                                           ? m_terminalSplitter->sizes().value(1, m_terminalHeight)
+                                           : m_terminalHeight);
 }
 
 void MainWindow::saveToGroup(KConfigGroup &group) const
@@ -1591,6 +1700,8 @@ void MainWindow::saveToGroup(KConfigGroup &group) const
     saveGeometryToGroup(group);
     group.writeEntry("SidebarVisible", m_actionToggleSidebar->isChecked());
     group.writeEntry("PreviewOpen", m_preview->isVisible());
+    group.writeEntry("TerminalOpen", m_terminal->isVisible());
+    group.writeEntry("TerminalSync", m_terminal->syncEnabled());
     KConfigGroup treeGroup = group.group(QStringLiteral("PanelTree"));
     m_panelRoot->saveLayout(treeGroup);
 }
@@ -1725,7 +1836,10 @@ void MainWindow::restoreSettings()
     const bool previewOpen  = group.readEntry("PreviewOpen", false);
     const int  previewWidth = group.readEntry("PreviewWidth", -1);
     m_preview->setRememberedWidth(previewWidth);
-    QTimer::singleShot(0, this, [this, previewOpen, previewWidth]() {
+    const bool terminalOpen = group.readEntry("TerminalOpen", false);
+    m_terminalHeight = group.readEntry("TerminalHeight", -1);
+    m_terminal->setSyncEnabled(group.readEntry("TerminalSync", true));
+    QTimer::singleShot(0, this, [this, previewOpen, previewWidth, terminalOpen]() {
         if (m_sidebarHeader && m_outerSplitter) {
             const int sw = m_outerSplitter->sizes().value(0, 220);
             m_sidebarHeader->setFixedWidth(qMax(sw, m_sidebarHeader->minimumSizeHint().width()));
@@ -1734,6 +1848,8 @@ void MainWindow::restoreSettings()
         // against the actual panels column.
         if (previewOpen)
             setPreviewVisible(true, previewWidth);
+        if (terminalOpen)
+            setTerminalVisible(true);
         repositionTabBars();
     });
 
@@ -1799,7 +1915,10 @@ void MainWindow::restoreFromGroup(const KConfigGroup &group)
     const bool previewOpen  = group.readEntry("PreviewOpen", false);
     const int  previewWidth = group.readEntry("PreviewWidth", -1);
     m_preview->setRememberedWidth(previewWidth);
-    QTimer::singleShot(0, this, [this, previewOpen, previewWidth]() {
+    const bool terminalOpen = group.readEntry("TerminalOpen", false);
+    m_terminalHeight = group.readEntry("TerminalHeight", -1);
+    m_terminal->setSyncEnabled(group.readEntry("TerminalSync", true));
+    QTimer::singleShot(0, this, [this, previewOpen, previewWidth, terminalOpen]() {
         if (m_sidebarHeader && m_outerSplitter) {
             const int sw = m_outerSplitter->sizes().value(0, 220);
             m_sidebarHeader->setFixedWidth(qMax(sw, m_sidebarHeader->minimumSizeHint().width()));
@@ -1808,6 +1927,8 @@ void MainWindow::restoreFromGroup(const KConfigGroup &group)
         // against the actual panels column.
         if (previewOpen)
             setPreviewVisible(true, previewWidth);
+        if (terminalOpen)
+            setTerminalVisible(true);
         repositionTabBars();
     });
 }
@@ -2364,4 +2485,6 @@ void MainWindow::relocatePanelsOffMount(const QString &mountpoint)
         fallback = QUrl::fromLocalFile(QFileInfo(mountpoint).absolutePath());
     for (Panel *p : m_panelRoot->allPanels())
         p->relocateTabsUnder(root, fallback);
+    m_terminal->relocateOffMount(mountpoint, fallback.toLocalFile());
 }
+

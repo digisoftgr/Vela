@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE gui SYSTEM "kpartgui.dtd">
-<gui name="vela" version="8">
+<gui name="vela" version="9">
   <MenuBar>
     <Menu name="file"><text>&amp;File</text>
       <Action name="new_folder"/>
@@ -16,6 +16,8 @@
     </Menu>
     <Menu name="view"><text>&amp;View</text>
       <Action name="toggle_sidebar"/>
+      <Action name="toggle_terminal"/>
+      <Action name="focus_terminal"/>
       <Action name="show_operations"/>
       <Separator/>
       <Action name="command_palette"/>

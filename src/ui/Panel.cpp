@@ -581,13 +581,23 @@ void Panel::startEmbedded(const QUrl &url, const QUrl &reveal)
 
 void Panel::navigateTo(const QUrl &url)
 {
+    navigate(url, /*takeFocus=*/true);
+}
+
+void Panel::navigateToWithoutFocus(const QUrl &url)
+{
+    navigate(url, /*takeFocus=*/false);
+}
+
+void Panel::navigate(const QUrl &url, bool takeFocus)
+{
     if (m_currentTab < 0)
         return;
     // Exit search mode on user-initiated navigation (not from search result activation)
     if (m_inSearchMode && m_pendingAction == PendingAction::None)
         exitSearchMode();
     currentTab().history.push(url);
-    loadUrl(url);
+    loadUrl(url, takeFocus);
 }
 
 void Panel::navigateAndReveal(const QUrl &folder, const QUrl &fileToReveal)
@@ -1829,7 +1839,7 @@ void Panel::onDirectoryLoaded(const QUrl &)
     // back/forward, etc.  Skip when an inline rename is about to steal focus.
     // An embedded panel (the preview) takes it only when focus is already
     // inside it: its listings must not pull the keyboard out of the tab.
-    if (m_pendingAction != PendingAction::SelectAndEdit
+    if (m_takeFocusOnLoad && m_pendingAction != PendingAction::SelectAndEdit
         && (!m_embedded || isAncestorOf(QApplication::focusWidget())))
         currentView()->setFocus();
 
@@ -2186,8 +2196,10 @@ void Panel::onSearchResultsBatch(const KFileItemList &items)
 
 // ── Private helpers ───────────────────────────────────────────────────────────
 
-void Panel::loadUrl(const QUrl &url)
+void Panel::loadUrl(const QUrl &url, bool takeFocus)
 {
+    // Before setDirectory(): a cached listing can complete inside it.
+    m_takeFocusOnLoad = takeFocus;
     m_lockedSortAppliedFor.clear(); // a fresh load gets the locked/default sort again
     m_pendingFallback->stop();      // a create/paste wait belongs to the old directory
     m_model->setDirectory(url);

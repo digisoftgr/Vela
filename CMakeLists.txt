@@ -34,6 +34,7 @@ find_package(KF6 REQUIRED COMPONENTS
     JobWidgets
     SyntaxHighlighting
     Service
+    Parts           # embedded terminal (Konsole's KPart, loaded at runtime)
 )
 find_package(Poppler REQUIRED COMPONENTS Qt6)
 

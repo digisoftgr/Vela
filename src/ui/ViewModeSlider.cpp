@@ -6,7 +6,9 @@
 #include <QEvent>
 #include <QHBoxLayout>
 #include <QIcon>
+#include <QAction>
 #include <QMenu>
+#include <QPointer>
 #include <QTimer>
 #include <QToolButton>
 
@@ -25,6 +27,12 @@ static constexpr int kModeCount = static_cast<int>(std::size(kModes));
 static const char *kFolderSizeStyleActive =
     "QToolButton { background-color: rgba(220,150,0,70);"
     " border: 1px solid rgba(200,130,0,130); border-radius: 3px; }";
+
+// Same shape as the folder-size highlight, in the selection-blue family: on is
+// a normal state here, not a warning.
+static const char *kTerminalStyleActive =
+    "QToolButton { background-color: rgba(61,174,233,60);"
+    " border: 1px solid rgba(61,174,233,140); border-radius: 3px; }";
 
 static const char *kFolderSizeTooltipOff =
     "Analyse folder sizes\n\n"
@@ -47,6 +55,16 @@ ViewModeSlider::ViewModeSlider(QWidget *parent)
     auto *layout = new QHBoxLayout(this);
     layout->setContentsMargins(4, 0, 4, 0);
     layout->setSpacing(4);
+
+    // ── Terminal toggle (wired to its action by setTerminalAction) ────────────
+    m_terminalBtn = new QToolButton(this);
+    m_terminalBtn->setAutoRaise(true);
+    m_terminalBtn->setCheckable(true);
+    m_terminalBtn->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    m_terminalBtn->setIcon(QIcon::fromTheme(QStringLiteral("utilities-terminal")));
+    m_terminalBtn->setText(i18n("Terminal"));
+    m_terminalBtn->setEnabled(false);
+    layout->addWidget(m_terminalBtn);
 
     // ── Folder size analysis toggle ───────────────────────────────────────────
     m_folderSizeBtn = new QToolButton(this);
@@ -138,6 +156,36 @@ void ViewModeSlider::setActivePanel(Panel *panel)
                                });
 }
 
+void ViewModeSlider::setTerminalAction(QAction *action)
+{
+    m_terminalBtn->setEnabled(action != nullptr);
+    if (!action)
+        return;
+    // Not setDefaultAction(): that would show the action's menu text
+    // ("Show Terminal") instead of the short label.
+    connect(m_terminalBtn, &QToolButton::clicked, action, &QAction::trigger);
+    connect(action, &QAction::toggled, this, &ViewModeSlider::updateTerminalButton);
+    connect(action, &QAction::changed, this, [this, action]() {
+        updateTerminalButton(action->isChecked()); // shortcut may have been rebound
+    });
+    m_terminalAction = action;
+    updateTerminalButton(action->isChecked());
+}
+
+void ViewModeSlider::updateTerminalButton(bool shown)
+{
+    {
+        const QSignalBlocker block(m_terminalBtn);
+        m_terminalBtn->setChecked(shown);
+    }
+    m_terminalBtn->setStyleSheet(shown ? QLatin1String(kTerminalStyleActive) : QString{});
+    const QString key = m_terminalAction
+        ? m_terminalAction->shortcut().toString(QKeySequence::NativeText) : QString();
+    const QString tip = shown ? i18n("Hide the terminal. Its shell and anything running in it end.")
+                              : i18n("Show a terminal below the panels, following the active folder");
+    m_terminalBtn->setToolTip(key.isEmpty() ? tip : i18n("%1 (%2)", tip, key));
+}
+
 bool ViewModeSlider::eventFilter(QObject *watched, QEvent *event)
 {
     if (watched == m_modeButton) {
@@ -203,6 +251,7 @@ void ViewModeSlider::updateFolderSizeButton(bool active)
 
 void ViewModeSlider::updateIcons()
 {
+    m_terminalBtn->setIcon(QIcon::fromTheme(QStringLiteral("utilities-terminal")));
     updateFoldersFirstButton(m_foldersFirstBtn->isChecked());
     updateFolderSizeButton(m_folderSizeBtn->isChecked());
     const QString cur = m_modeButton->text();
