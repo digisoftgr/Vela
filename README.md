@@ -89,34 +89,15 @@ All of these can be changed.
 
 ## Installation
 
-### Arch Linux (AUR)
+Vela is built from source. There are no prebuilt packages yet.
 
-```bash
-paru -S vela
-```
+**Full instructions, with the dependency list for each distribution: [instructions_to_install.md](instructions_to_install.md).** It covers:
 
-or with any other AUR helper, or manually:
+- **Arch Linux**
+- **Kubuntu 25.10 or newer.** Older releases lack the KDE Frameworks 6 development packages.
+- Other distributions, with a list of what to look for.
 
-```bash
-git clone https://aur.archlinux.org/vela.git
-cd vela
-makepkg -si
-```
-
-### Build from source
-
-Dependencies on Arch Linux:
-
-```bash
-sudo pacman -S cmake extra-cmake-modules qt6-base qt6-tools \
-    kbookmarks kcolorscheme kconfig kconfigwidgets kcoreaddons \
-    kglobalaccel kguiaddons ki18n kio kjobwidgets kservice \
-    kwidgetsaddons kxmlgui solid syntax-highlighting poppler-qt6
-```
-
-On Arch, the KDE Frameworks 6 packages carry no `kf6-` prefix. On other distributions, install the equivalent development packages for Qt 6 (Core, Widgets, Concurrent, DBus), the KDE Frameworks 6 modules listed above, Extra CMake Modules and Poppler's Qt 6 bindings. Names differ per distribution, for example `kf6-kio-devel` on Fedora.
-
-Build and install:
+Once the dependencies are installed, the build is the same everywhere:
 
 ```bash
 git clone https://github.com/digisoftgr/Vela.git
@@ -126,14 +107,9 @@ cmake --build build -j"$(nproc)"
 sudo cmake --install build
 ```
 
-### Run without installing
+Then start it with `vela`, or from the application menu.
 
-```bash
-cmake -B build -DCMAKE_BUILD_TYPE=Debug
-bash run.sh
-```
-
-`run.sh` rebuilds if needed and starts Vela from the build tree.
+To try Vela without installing it, run `bash run.sh` after a Debug configure. The guide has the details, plus updating and uninstalling.
 
 ## Optional packages
 
