@@ -5,17 +5,69 @@
 
 #include <KCoreDirLister>
 #include <KDirWatch>
+#include <KFileSystemType>
 #include <KIO/CopyJob>
 #include <KIO/DirectorySizeJob>
 #include <KIO/FileUndoManager>
 #include <KIO/JobUiDelegateFactory>
 #include <KLocalizedString>
 
+#include <QCoreApplication>
 #include <QFileInfo>
+#include <QFileSystemWatcher>
 #include <QFutureWatcher>
+#include <QPointer>
+#include <QTimer>
 #include <QtConcurrent/QtConcurrentRun>
+#include <kcoreaddons_version.h>
 
 #include <utility>
+
+namespace {
+
+// The one watcher behind every model's fast pickup: QFileSystemWatcher costs an
+// inotify instance each, and instances are scarce (often 128 per user, shared
+// with every other application). Parented to the application; a QPointer, as
+// models may outlive it during shutdown.
+QFileSystemWatcher *sharedFastWatcher()
+{
+    static QPointer<QFileSystemWatcher> watcher = new QFileSystemWatcher(qApp);
+    return watcher;
+}
+
+QHash<QString, int> &fastWatchRefs()
+{
+    static QHash<QString, int> refs;
+    return refs;
+}
+
+bool acquireFastWatch(const QString &path)
+{
+    QFileSystemWatcher *w = sharedFastWatcher();
+    if (!w)
+        return false;
+    // Ask the watcher, not the count: inotify drops the watch of a deleted
+    // directory on its own, and a recreated one needs adding again.
+    if (!w->directories().contains(path) && !w->addPath(path))
+        return false;
+    ++fastWatchRefs()[path];
+    return true;
+}
+
+void releaseFastWatch(const QString &path)
+{
+    auto &refs = fastWatchRefs();
+    const auto it = refs.find(path);
+    if (it == refs.end())
+        return;
+    if (--it.value() > 0)
+        return;
+    refs.erase(it);
+    if (QFileSystemWatcher *w = sharedFastWatcher())
+        w->removePath(path);
+}
+
+} // namespace
 
 FileSystemModel::FileSystemModel(QObject *parent)
     : FileItemModelBase(parent)
@@ -34,6 +86,7 @@ FileSystemModel::FileSystemModel(QObject *parent)
     connect(m_dirLister, &KCoreDirLister::completed,    this, &FileSystemModel::onListerCompleted);
     connect(m_dirLister, &KCoreDirLister::jobError, this, [this](KIO::Job *job) {
         m_listingError = true;
+        m_fastRelistRunning = false; // its completed() will not come through
         Q_EMIT directoryError(job ? job->errorString() : i18n("Could not read the directory."));
     });
 
@@ -44,11 +97,35 @@ FileSystemModel::FileSystemModel(QObject *parent)
     // other split panel, another window, a terminal) surfaces immediately.
     m_dirWatch = new KDirWatch(this);
     connect(m_dirWatch, &KDirWatch::deleted, this, &FileSystemModel::onWatchedPathDeleted);
+
+    m_clock.start();
+    if (QFileSystemWatcher *w = sharedFastWatcher()) {
+        connect(w, &QFileSystemWatcher::directoryChanged, this, [this](const QString &path) {
+            if (path == m_fastWatchedPath)
+                onFastWatchFired();
+        });
+    }
+    m_fastRelistTimer = new QTimer(this);
+    m_fastRelistTimer->setSingleShot(true);
+    connect(m_fastRelistTimer, &QTimer::timeout, this, &FileSystemModel::startFastRelist);
+    m_fastResumeTimer = new QTimer(this);
+    m_fastResumeTimer->setSingleShot(true);
+    m_fastResumeTimer->setInterval(kFastResumeQuietMs);
+    connect(m_fastResumeTimer, &QTimer::timeout, this, [this]() {
+        // Quiet again: catch up on what KIO's slower path may not have shown
+        // yet, and take the fast path from here.
+        m_fastPaused = false;
+        m_fastRelists.clear();
+        m_fastCatchUp = true;
+        m_fastRelistTimer->start(0);
+    });
 }
 
 FileSystemModel::~FileSystemModel()
 {
     cancelAllFolderSizeJobs();
+    if (!m_fastWatchedPath.isEmpty())
+        releaseFastWatch(m_fastWatchedPath);
     // m_dirLister is a QObject child and is destroyed automatically.
 }
 
@@ -114,6 +191,30 @@ bool FileSystemModel::foldersFirst() const
 void FileSystemModel::watchCurrentDirectory()
 {
     const QString path = m_currentDir.isLocalFile() ? m_currentDir.toLocalFile() : QString();
+
+    // A new directory: what was pending for the old one no longer applies.
+    if (path != m_fastWatchedPath) {
+        resetFastPickup();
+        if (!m_fastWatchedPath.isEmpty())
+            releaseFastWatch(m_fastWatchedPath);
+        m_fastWatchedPath.clear();
+        const KFileSystemType::Type fs =
+            path.isEmpty() ? KFileSystemType::Unknown : KFileSystemType::fileSystemType(path);
+        bool network = fs == KFileSystemType::Nfs || fs == KFileSystemType::Smb;
+#if KCOREADDONS_VERSION >= QT_VERSION_CHECK(6, 30, 0)
+        // sshfs, rclone, …: before 6.30 the common ones already read as Nfs.
+        network = network || fs == KFileSystemType::FuseNoDev;
+#endif
+        if (!path.isEmpty() && !network && acquireFastWatch(path))
+            m_fastWatchedPath = path;
+    } else if (!path.isEmpty()) {
+        // Same directory, re-armed (a reload after it was deleted and
+        // recreated): inotify dropped the watch with the old directory.
+        QFileSystemWatcher *w = sharedFastWatcher();
+        if (w && !w->directories().contains(path))
+            w->addPath(path);
+    }
+
     if (path == m_watchedPath)
         return;
 
@@ -124,6 +225,62 @@ void FileSystemModel::watchCurrentDirectory()
     // they fall back to revalidateDirectory() on activation.
     if (!m_watchedPath.isEmpty())
         m_dirWatch->addDir(m_watchedPath);
+}
+
+// ── Fast change pickup ────────────────────────────────────────────────────────
+
+void FileSystemModel::onFastWatchFired()
+{
+    if (m_fastPaused) {
+        m_fastResumeTimer->start(); // not quiet yet
+        return;
+    }
+    // Coalesce a burst; one already queued or running absorbs this change.
+    if (m_fastRelistRunning) {
+        m_fastRelistAgain = true;
+        return;
+    }
+    if (!m_fastRelistTimer->isActive())
+        m_fastRelistTimer->start(kFastRelistDelayMs);
+}
+
+void FileSystemModel::refreshSoon()
+{
+    // Not a filesystem event: while paused it neither re-lists nor delays the
+    // resume. KIO's own path shows the change meanwhile.
+    if (!m_fastPaused)
+        onFastWatchFired();
+}
+
+void FileSystemModel::pauseFastPickup()
+{
+    m_fastPaused = true;
+    m_fastRelistTimer->stop();
+    m_fastRelistAgain = false;
+    m_fastResumeTimer->start();
+}
+
+void FileSystemModel::resetFastPickup()
+{
+    m_fastRelistTimer->stop();
+    m_fastResumeTimer->stop();
+    m_fastRelistRunning = false;
+    m_fastRelistAgain = false;
+    m_fastPaused = false;
+    m_fastCatchUp = false;
+    m_fastRelists.clear();
+}
+
+void FileSystemModel::startFastRelist()
+{
+    // The initial load is still streaming in (it will show the change itself),
+    // or there is nothing valid to re-list.
+    if (m_initialLoading || m_listingError || !m_currentDir.isValid())
+        return;
+    m_fastRelistRunning = true;
+    m_fastRelistStartedMs = m_clock.elapsed();
+    // A live update: its completed() takes the light directoryRefreshed path.
+    m_dirLister->updateDirectory(m_currentDir);
 }
 
 void FileSystemModel::onWatchedPathDeleted(const QString &path)
@@ -485,6 +642,32 @@ void FileSystemModel::onListerCompleted()
     if (m_listingError) // a failed listing must not surface as "loaded" / "empty"
         return;
     m_initialLoading = false; // bulk load finished; later deltas may refresh freely
+    if (m_fastRelistRunning) {
+        m_fastRelistRunning = false;
+        const qint64 now = m_clock.elapsed();
+        m_lastFastRelistMs = now - m_fastRelistStartedMs;
+
+        // Constant change? Count and cost over the window decide. The
+        // catch-up after a resume answers the earlier churn, not new churn.
+        if (!std::exchange(m_fastCatchUp, false))
+            m_fastRelists.append({m_fastRelistStartedMs, m_lastFastRelistMs});
+        qint64 spent = 0;
+        for (auto it = m_fastRelists.begin(); it != m_fastRelists.end();) {
+            if (it->first + it->second < now - kFastWindowMs) {
+                it = m_fastRelists.erase(it);
+            } else {
+                spent += it->second;
+                ++it;
+            }
+        }
+        if (m_fastRelists.size() > kMaxFastRelists
+            || spent > kMaxFastRelistShare * kFastWindowMs) {
+            pauseFastPickup();
+        } else if (m_fastRelistAgain) {
+            m_fastRelistAgain = false;
+            m_fastRelistTimer->start(qMax<qint64>(kFastRelistDelayMs, 2 * m_lastFastRelistMs));
+        }
+    }
     if (m_emitFullOnNextCompleted) {
         m_emitFullOnNextCompleted = false;
         Q_EMIT directoryLoaded(m_currentDir);

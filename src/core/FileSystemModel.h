@@ -2,6 +2,7 @@
 
 #include "FileItemModelBase.h"
 
+#include <QElapsedTimer>
 #include <QHash>
 #include <QList>
 #include <QPair>
@@ -13,6 +14,7 @@
 
 class KCoreDirLister;
 class KDirWatch;
+class QTimer;
 
 class FileSystemModel : public FileItemModelBase
 {
@@ -40,6 +42,11 @@ public:
 
     void optimisticallyRemove(const QList<QUrl> &urls);
     void immediateRefresh();
+    // A light re-list soon, coalesced and throttled like the fast watch below.
+    // For callers that know the directory likely changed (a terminal command
+    // just finished). Unlike immediateRefresh() it is a live update, not a
+    // load: no focus or selection routine runs when it lands.
+    void refreshSoon();
 
     // Re-checks that the listed directory is still on disk, reporting it through
     // directoryError if not. The KDirWatch below covers deletions live; this is
@@ -83,6 +90,7 @@ private Q_SLOTS:
     void onFolderSizeJobDone(const QUrl &url, KJob *job);
 
     void onWatchedPathDeleted(const QString &path);
+    void onFastWatchFired();
 
 private:
     // Reports the current directory as gone: stops the listing, drops the stale
@@ -90,6 +98,9 @@ private:
     // navigation to a missing path fails.
     void reportDirectoryGone();
     void watchCurrentDirectory();
+    void startFastRelist();
+    void pauseFastPickup();
+    void resetFastPickup();
 
     // Folder-size jobs are throttled: each KIO::directorySize is a full recursive
     // scan, and firing one per subfolder at once thrashes the disk (hundreds of
@@ -109,6 +120,40 @@ private:
     // extra inotify watch beyond the directory itself.
     KDirWatch *m_dirWatch = nullptr;
     QString m_watchedPath;  // local path currently registered with m_dirWatch
+
+    // ── Fast change pickup ────────────────────────────────────────────────────
+    // KCoreDirLister reports outside changes ~700 ms late: KDirWatch batches
+    // inotify events for 500 ms, then the lister waits 200 ms more (both fixed
+    // in KF6; measured on tmpfs, ext4 and ntfs alike). A plain inotify watch on
+    // the shown directory triggers the lister's re-list right away instead.
+    //
+    // One watcher (one inotify instance) is shared by every model; see
+    // acquireFastWatch(). Local, non-network mounts only — adding a watch on a
+    // hung NFS mount blocks.
+    //
+    // Bursts are coalesced over kFastRelistDelayMs, and at most one re-list runs
+    // at a time, spaced by twice the last one's duration. Under constant change
+    // the fast path pauses: more than kMaxFastRelists re-lists, or more than
+    // kMaxFastRelistShare of the time spent re-listing, within kFastWindowMs.
+    // KIO's own ~700 ms batching keeps the view correct meanwhile; once the
+    // directory has been quiet for kFastResumeQuietMs, one catch-up re-list runs
+    // and the fast path resumes.
+    static constexpr int    kFastRelistDelayMs  = 30;
+    static constexpr int    kFastWindowMs       = 2000;
+    static constexpr int    kMaxFastRelists     = 5;
+    static constexpr double kMaxFastRelistShare = 0.25;
+    static constexpr int    kFastResumeQuietMs  = 2000;
+    QTimer *m_fastRelistTimer = nullptr;
+    QTimer *m_fastResumeTimer = nullptr;  // restarted by every event while paused
+    QElapsedTimer m_clock;                // monotonic time base, started in the ctor
+    QString m_fastWatchedPath;
+    bool    m_fastRelistRunning = false;  // our updateDirectory() has not completed yet
+    bool    m_fastRelistAgain = false;    // a change arrived while it ran
+    bool    m_fastPaused = false;
+    bool    m_fastCatchUp = false;        // the re-list after a resume: not churn, not counted
+    qint64  m_fastRelistStartedMs = 0;
+    qint64  m_lastFastRelistMs = 0;       // duration of the last one, for the spacing
+    QList<QPair<qint64, qint64>> m_fastRelists; // (start, duration) within the window
     QSet<QString> m_revalidating; // paths with an existence check in flight
 
     bool m_showHidden = false;
