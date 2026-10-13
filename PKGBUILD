@@ -1,4 +1,5 @@
 # Maintainer: Digisoftgr <info@digisoftgr.gr>
+# Contributor: Kapetas Dimitris <kapetasdim98@gmail.com>
 pkgname=vela
 _name=Vela
 pkgver=0.7.2

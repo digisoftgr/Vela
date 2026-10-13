@@ -137,6 +137,13 @@ Source layout:
 - `src/ui/preview/`: the preview column (folder, image, PDF, text)
 - `resources/`: desktop file, icon, D-Bus service files, KXmlGui layout
 
+## Authors
+
+- [Digisoftgr](https://github.com/digisoftgr) (maintainer)
+- [Kapetas Dimitris](https://github.com/KapetasDim)
+
+See [AUTHORS](AUTHORS) for contact details.
+
 ## License
 
 Vela is free software, released under the [GNU General Public License v3.0 or later](LICENSE).
