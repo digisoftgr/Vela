@@ -9,22 +9,22 @@ url="https://github.com/digisoftgr/Vela"
 license=('GPL-3.0-or-later')
 depends=(
     'qt6-base'
-    'kf6-kcolorscheme'
-    'kf6-kconfig'
-    'kf6-kconfigwidgets'
-    'kf6-kcoreaddons'
-    'kf6-kglobalaccel'
-    'kf6-kguiaddons'
-    'kf6-ki18n'
-    'kf6-kio'
-    'kf6-kjobwidgets'
-    'kf6-kservice'
-    'kf6-kbookmarks'
-    'kf6-kwidgetsaddons'
-    'kf6-kxmlgui'
-    'kf6-solid'
-    'kf6-syntax-highlighting'
+    'kbookmarks'
+    'kcolorscheme'
+    'kconfig'
+    'kconfigwidgets'
+    'kcoreaddons'
+    'kglobalaccel'
+    'kguiaddons'
+    'ki18n'
+    'kio'
+    'kjobwidgets'
+    'kservice'
+    'kwidgetsaddons'
+    'kxmlgui'
     'poppler-qt6'
+    'solid'
+    'syntax-highlighting'
 )
 makedepends=(
     'cmake'
@@ -37,7 +37,7 @@ optdepends=(
     'kio-extras: thumbnails and network protocols such as sftp and smb'
 )
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('SKIP')
+sha256sums=('6b1c8b4e30924baf70817bb24255db293a9a0ff2eaf6c174f1bea456d4d26369')
 
 build() {
     cmake -B build -S "$_name-$pkgver" \

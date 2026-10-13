@@ -109,13 +109,12 @@ Dependencies on Arch Linux:
 
 ```bash
 sudo pacman -S cmake extra-cmake-modules qt6-base qt6-tools \
-    kf6-kbookmarks kf6-kcolorscheme kf6-kconfig kf6-kconfigwidgets \
-    kf6-kcoreaddons kf6-kglobalaccel kf6-kguiaddons kf6-ki18n kf6-kio \
-    kf6-kjobwidgets kf6-kservice kf6-kwidgetsaddons kf6-kxmlgui \
-    kf6-solid kf6-syntax-highlighting poppler-qt6
+    kbookmarks kcolorscheme kconfig kconfigwidgets kcoreaddons \
+    kglobalaccel kguiaddons ki18n kio kjobwidgets kservice \
+    kwidgetsaddons kxmlgui solid syntax-highlighting poppler-qt6
 ```
 
-On other distributions, install the equivalent development packages for Qt 6 (Core, Widgets, Concurrent, DBus), the KDE Frameworks 6 modules listed above, Extra CMake Modules and Poppler's Qt 6 bindings.
+On Arch, the KDE Frameworks 6 packages carry no `kf6-` prefix. On other distributions, install the equivalent development packages for Qt 6 (Core, Widgets, Concurrent, DBus), the KDE Frameworks 6 modules listed above, Extra CMake Modules and Poppler's Qt 6 bindings. Names differ per distribution, for example `kf6-kio-devel` on Fedora.
 
 Build and install:
 
