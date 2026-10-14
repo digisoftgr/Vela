@@ -1,6 +1,6 @@
 pkgbase = vela
 	pkgdesc = Tabbed KDE Plasma file manager with built-in file and folder previews
-	pkgver = 0.7.5
+	pkgver = 0.7.6
 	pkgrel = 1
 	url = https://github.com/digisoftgr/Vela
 	arch = x86_64
@@ -29,7 +29,7 @@ pkgbase = vela
 	optdepends = ark: compress and extract archives from the context menu
 	optdepends = konsole: embedded terminal panel (F4) and default terminal for "Open Terminal Here"
 	optdepends = kio-extras: thumbnails and network protocols such as sftp and smb
-	source = vela-0.7.5.tar.gz::https://github.com/digisoftgr/Vela/archive/refs/tags/v0.7.5.tar.gz
-	sha256sums = 6c0c2e0eda7559461e077dc9ca110ba8f3df247852ccc02383d8f5af22dc1a6f
+	source = vela-0.7.6.tar.gz::https://github.com/digisoftgr/Vela/archive/refs/tags/v0.7.6.tar.gz
+	sha256sums = cc7aa348b57c18c097339adba0c8d8ac1951c80b43cd0da87ebbde5f14d27a33
 
 pkgname = vela
