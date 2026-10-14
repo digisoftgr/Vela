@@ -8,8 +8,6 @@
 #include <atomic>
 #include <memory>
 
-class QThreadPool;
-
 // Resolves MIME types that can only be determined by reading file contents,
 // off the GUI thread.
 //
@@ -21,7 +19,7 @@ class QThreadPool;
 // window outright.
 //
 // Requests are deduplicated and answered on the GUI thread via resolved().
-// All resolvers share one small thread pool.
+// All resolvers run on WorkerPools::io().
 class MimeTypeResolver : public QObject
 {
     Q_OBJECT
@@ -40,15 +38,16 @@ public:
 
 Q_SIGNALS:
     // Always delivered on the GUI thread (queued from the worker).
-    void resolved(const QUrl &url, const QString &mimeName);
+    // `comment` is a .desktop entry's own Comment, empty otherwise. `iconName`
+    // is the entry's Icon for a .desktop file, else the resolved type's icon.
+    void resolved(const QUrl &url, const QString &mimeName, const QString &comment,
+                  const QString &iconName);
 
 private:
     // Shared with the tasks, which may outlive this object.
     struct Shared {
         std::atomic<int> generation{0};
     };
-
-    static QThreadPool *sharedPool();
 
     std::shared_ptr<Shared> m_shared;
     QSet<QUrl> m_pending;

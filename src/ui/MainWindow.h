@@ -56,6 +56,9 @@ public:
     static void raiseExisting();                                    // raise a live window
     // Any currently-live window, or nullptr. For parenting dialogs.
     static QWidget *anyLiveWindow();
+    // Applies the theme setting (0 = System, 1 = Light, 2 = Dark). Used at
+    // startup, before the first window exists, and on every Apply.
+    static void applyColorScheme(int mode);
 
     // ── Drag-and-drop target API ──────────────────────────────────────────────
     // Called by the dragging window on whichever MainWindow the cursor is over.

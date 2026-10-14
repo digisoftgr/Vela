@@ -142,6 +142,8 @@ void PdfPreview::clear()
     m_cache.clear();
     m_staleCache.clear();
     m_inflight.clear();
+    m_wanted->first.store(0);
+    m_wanted->last.store(std::numeric_limits<int>::max());
     m_strip->m_offsets.clear();
     m_strip->resize(0, 0);
     m_info->clear();
@@ -238,6 +240,7 @@ void PdfPreview::relayout()
     m_strip->m_offsets.append(y);
     m_strip->resize(m_scroll->viewport()->width(), y - kPageGap + kMargin);
     m_strip->update();
+    evictFarPages(); // also sets the wanted range for the new layout
 }
 
 void PdfPreview::resizeEvent(QResizeEvent *event)
@@ -277,6 +280,7 @@ void PdfPreview::requestPage(int page)
     auto doc  = m_doc;
     auto lock = m_renderLock;
     auto live = m_liveGeneration;
+    auto wanted = m_wanted;
 
     auto *watcher = new QFutureWatcher<Rendered>(this);
     watcher->setProperty("generation", generation);
@@ -295,13 +299,19 @@ void PdfPreview::requestPage(int page)
         m_strip->update();
     });
 
-    watcher->setFuture(QtConcurrent::run(WorkerPools::pdf(), [doc, lock, live, generation, page, scale, dpr]() -> Rendered {
+    watcher->setFuture(QtConcurrent::run(WorkerPools::pdf(), [doc, lock, live, wanted, generation, page, scale, dpr]() -> Rendered {
         Rendered r;
         r.page  = page;
         r.scale = scale;
-        if (live->load() != generation)
+        const auto worthIt = [&]() {
+            return live->load() == generation
+                   && page >= wanted->first.load() && page <= wanted->last.load();
+        };
+        if (!worthIt())
             return r; // scrolled past, resized or replaced while queued
         QMutexLocker locker(lock.get());
+        if (!worthIt())
+            return r; // went out of range while waiting for the document
         std::unique_ptr<Poppler::Page> p = doc->page(page);
         if (!p)
             return r;
@@ -328,6 +338,8 @@ void PdfPreview::evictFarPages()
     while (last + 1 < off.size() - 1 && off[last + 1] <= bottom)
         ++last;
     constexpr int kKeep = 3;
+    m_wanted->first.store(first - kKeep);
+    m_wanted->last.store(last + kKeep);
     for (auto it = m_cache.begin(); it != m_cache.end(); ) {
         if (it.key() < first - kKeep || it.key() > last + kKeep)
             it = m_cache.erase(it);

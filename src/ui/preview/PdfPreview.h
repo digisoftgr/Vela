@@ -1,5 +1,8 @@
 #pragma once
 
+#include <atomic>
+#include <limits>
+
 #include <QFutureWatcher>
 #include <QHash>
 #include <QImage>
@@ -99,6 +102,15 @@ private:
     // through a 500-page one no longer runs every superseded job.
     std::shared_ptr<std::atomic<int>> m_liveGeneration = std::make_shared<std::atomic<int>>(0);
     void bumpGeneration();
+    // Pages worth rendering: the visible ones plus a margin, updated on every
+    // scroll. A queued render outside it is skipped — the generation alone
+    // never changed on scroll, so a fling through a long document used to
+    // render every page it passed.
+    struct WantedRange {
+        std::atomic<int> first{0};
+        std::atomic<int> last{std::numeric_limits<int>::max()};
+    };
+    std::shared_ptr<WantedRange> m_wanted = std::make_shared<WantedRange>();
     QFutureWatcher<Loaded>   *m_loadWatcher = nullptr;
     QList<QFutureWatcher<Rendered> *> m_renderWatchers;
 };

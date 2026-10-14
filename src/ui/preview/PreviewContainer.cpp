@@ -697,7 +697,7 @@ void PreviewContainer::goLive(Gesture gesture, const KFileItem &target, const QP
     }
 
     // As the panel above shows it, like the snapshot did; not the default.
-    m_live->model()->setShowHidden(m_showHidden);
+    m_live->setShowHidden(m_showHidden);
     m_live->startEmbedded(m_item.url(), reveal);
     if (auto *snapshot = static_cast<FolderPreview *>(m_pages[Folder]))
         snapshot->clear();
@@ -832,7 +832,7 @@ void PreviewContainer::syncChild()
     if (count > 1)
         child->showMessage(i18np("%1 item selected", "%1 items selected", count));
     else
-        child->showItem(selected, m_live->model() && m_live->model()->showHidden());
+        child->showItem(selected, m_live->showHidden());
 }
 
 PreviewContainer *PreviewContainer::ensureChild()

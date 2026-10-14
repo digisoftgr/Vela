@@ -145,7 +145,7 @@ void PreviewPane::refresh()
     } else if (count > 1) {
         m_root->showMessage(i18np("%1 item selected", "%1 items selected", count));
     } else {
-        m_root->showItem(item, m_panel->model() && m_panel->model()->showHidden());
+        m_root->showItem(item, m_panel->showHidden());
         m_scroll->ensureVisible(0, 0);
     }
 }

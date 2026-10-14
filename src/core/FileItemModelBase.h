@@ -148,6 +148,8 @@ private:
     // `requestSniff` = queue a content sniff when the name is not decisive
     // (painting a cell); false for sorting.
     QString typeTextForRow(int row, bool requestSniff) const;
+    // DecorationRole for the Name column, without any file access.
+    QIcon iconForRow(int row) const;
 
     QHash<QUrl, int> m_urlToRow;
 
@@ -159,6 +161,9 @@ private:
         TypeState typeState = TypeUnknown;
         std::optional<QCollatorSortKey> nameKey;
         int typeKeyId = -1; // into m_typeKeys; reset whenever typeText changes
+        // Icon from a worker-side resolution (content sniff, .desktop Icon=);
+        // empty means the item's own name-based icon.
+        QString iconName;
     };
     mutable std::vector<RowCache> m_rowCache;
     int m_dirCount = 0;

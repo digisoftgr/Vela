@@ -54,9 +54,8 @@ QString formatFileTime(const QDateTime &dt)
     return dt.toString(dateFormat());
 }
 
-QIcon cachedIcon(const KFileItem &item)
+QIcon cachedIconByName(const QString &name)
 {
-    const QString name = item.iconName();
     auto it = s_iconCache.constFind(name);
     if (it == s_iconCache.constEnd())
         it = s_iconCache.insert(name, QIcon::fromTheme(name));
@@ -130,18 +129,26 @@ FileItemModelBase::FileItemModelBase(QObject *parent)
     // A late-arriving MIME type repaints exactly one row; the URL index makes
     // finding it O(1).
     connect(m_mimeResolver, &MimeTypeResolver::resolved, this,
-            [this](const QUrl &url, const QString &mimeName) {
+            [this](const QUrl &url, const QString &mimeName, const QString &comment,
+                   const QString &iconName) {
         // Row check first: a result for a row that has gone is dropped rather
         // than cached (it used to pile up in a URL-keyed map).
         const int row = rowForUrl(url);
         if (row < 0)
             return;
         RowCache &rc = m_rowCache[row];
-        rc.typeText  = commentForMimeName(mimeName);
+        rc.typeText  = comment.isEmpty() ? commentForMimeName(mimeName) : comment;
         rc.typeState = RowCache::TypeFinal;
         rc.typeKeyId = -1;
+        const bool iconChanged = !iconName.isEmpty() && rc.iconName != iconName;
+        if (iconChanged)
+            rc.iconName = iconName;
         const QModelIndex idx = createIndex(row, Type);
         Q_EMIT dataChanged(idx, idx, {TypeResolvedRole});
+        if (iconChanged) {
+            const QModelIndex nameIdx = createIndex(row, Name);
+            Q_EMIT dataChanged(nameIdx, nameIdx, {Qt::DecorationRole});
+        }
     });
 }
 
@@ -233,14 +240,19 @@ QString FileItemModelBase::typeTextForRow(int row, bool requestSniff) const
         return text;
     };
 
-    // .desktop entries describe themselves, and KFileItem::mimeComment()
-    // surfaces that. Safe to call here specifically because the ".desktop"
-    // suffix is decisive — the type resolves from the name, so no content sniff
-    // is triggered. Symlinks deliberately are *not* special-cased: isLink() is
-    // cheap but mimeComment() on one forces determination of the target, and
-    // directories like /usr/lib are full of them.
-    if (item.name().endsWith(QLatin1String(".desktop"), Qt::CaseInsensitive))
-        return finalText(item.mimeComment());
+    // .desktop entries describe themselves: their type text is the entry's
+    // Comment. That is a file read, so it goes to the worker like a sniff —
+    // KFileItem::mimeComment() used to read it here, on the GUI thread, once
+    // per row (hundreds of reads sorting /usr/share/applications by Type).
+    const bool desktopEntry =
+        item.name().endsWith(QLatin1String(".desktop"), Qt::CaseInsensitive) && item.isLocalFile();
+    if (desktopEntry) {
+        if (requestSniff) {
+            rc.typeState = RowCache::TypePending;
+            m_mimeResolver->resolve(item.url());
+        }
+        return {};
+    }
 
     if (item.isMimeTypeKnown())
         return finalText(commentForMimeName(item.currentMimeType().name()));
@@ -258,6 +270,32 @@ QString FileItemModelBase::typeTextForRow(int row, bool requestSniff) const
         m_mimeResolver->resolve(item.url());
     }
     return {};
+}
+
+// Never touches the file. A sniffed type or a .desktop entry's own Icon= wins
+// once a worker has resolved it; until then a .desktop file shows the generic
+// desktop icon (KFileItem::iconName() would read the entry on this thread),
+// and everything else its name-based icon.
+QIcon FileItemModelBase::iconForRow(int row) const
+{
+    RowCache &rc = m_rowCache[row];
+    if (!rc.iconName.isEmpty())
+        return cachedIconByName(rc.iconName);
+    const KFileItem &item = m_items.at(row);
+    if (item.isLocalFile() && item.name().endsWith(QLatin1String(".desktop"), Qt::CaseInsensitive)) {
+        if (rc.typeState == RowCache::TypeUnknown) {
+            rc.typeState = RowCache::TypePending;
+            m_mimeResolver->resolve(item.url());
+        }
+        return cachedIconByName(QStringLiteral("application-x-desktop"));
+    }
+    const QIcon icon = cachedIconByName(item.iconName());
+    // The name was not decisive (an extension-less script, a LICENSE): the
+    // icon above is a guess. Resolve it the way the Type cell does — by name
+    // if possible, else a worker-side sniff whose result replaces the icon.
+    if (rc.typeState == RowCache::TypeUnknown && !item.isDir() && !item.isMimeTypeKnown())
+        typeTextForRow(row, /*requestSniff=*/true);
+    return icon;
 }
 
 // ── Thumbnails ────────────────────────────────────────────────────────────────
@@ -528,7 +566,7 @@ QVariant FileItemModelBase::data(const QModelIndex &index, int role) const
                 if (m_thumbLoader->thumbnail(item.url(), thumb))
                     return thumb;
             }
-            return cachedIcon(item);
+            return iconForRow(index.row());
         }
         break;
 

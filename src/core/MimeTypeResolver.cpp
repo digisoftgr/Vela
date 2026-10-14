@@ -8,24 +8,7 @@
 #include <QPointer>
 #include <QThreadPool>
 
-// One pool for every resolver (two models per panel used to mean two pools
-// per panel). This is short, latency-bound I/O (a few hundred bytes per file),
-// not throughput work: a couple of threads is plenty and keeps us from
-// competing with thumbnail generation for disk time.
-QThreadPool *MimeTypeResolver::sharedPool()
-{
-    // No parent and never deleted: ~QThreadPool waits for running tasks, and
-    // a sniff stuck on a hung mount would then freeze quitting. (This used to
-    // drain the pool on aboutToQuit with an unbounded waitForDone().) Tasks
-    // report through WorkerPools::postToGui, which stops posting once the
-    // application starts shutting down.
-    static QThreadPool *pool = [] {
-        auto *p = new QThreadPool;
-        p->setMaxThreadCount(2);
-        return p;
-    }();
-    return pool;
-}
+#include <KDesktopFile>
 
 MimeTypeResolver::MimeTypeResolver(QObject *parent)
     : QObject(parent)
@@ -60,7 +43,10 @@ void MimeTypeResolver::resolve(const QUrl &url)
     const int generation = m_shared->generation.load();
     // Created here, on the GUI thread; only ever dereferenced there as well.
     const QPointer<MimeTypeResolver> self(this);
-    sharedPool()->start([shared = m_shared, generation, self, url, path]() {
+    // The shared I/O pool rather than a private two-thread one: a sniff stuck
+    // on a hung mount then ties up one of many threads, instead of half of the
+    // only two that served every panel's Type column.
+    WorkerPools::io()->start([shared = m_shared, generation, self, url, path]() {
         if (shared->generation.load() != generation)
             return; // cancelled while queued — skip the read entirely
 
@@ -68,16 +54,27 @@ void MimeTypeResolver::resolve(const QUrl &url)
         // file's leading bytes only when the name is not decisive.
         static QMimeDatabase db;
         const QString name = db.mimeTypeForFile(path).name();
+        // A .desktop entry describes itself; its Comment is the type text.
+        // Read here, not via KFileItem::mimeComment() on the GUI thread.
+        QString comment;
+        QString iconName;
+        if (path.endsWith(QLatin1String(".desktop"), Qt::CaseInsensitive)) {
+            const KDesktopFile desktop(path);
+            comment  = desktop.readComment();
+            iconName = desktop.readIcon();
+        }
+        if (iconName.isEmpty())
+            iconName = db.mimeTypeForName(name).iconName();
 
         if (shared->generation.load() != generation)
             return;
-        WorkerPools::postToGui([shared, generation, self, url, name]() {
+        WorkerPools::postToGui([shared, generation, self, url, name, comment, iconName]() {
             // GUI thread: the generation and the pointer are checked where
             // they are changed, so neither can move under us.
             if (!self || shared->generation.load() != generation)
                 return;
             self->m_pending.remove(url);
-            Q_EMIT self->resolved(url, name);
+            Q_EMIT self->resolved(url, name, comment, iconName);
         });
     });
 }

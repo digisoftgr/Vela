@@ -7,8 +7,6 @@
 #include "config.h"
 
 #include <KAboutData>
-#include <KColorSchemeManager>
-#include <KColorSchemeModel>
 #include <KLocalizedString>
 #include <QApplication>
 #include <QCommandLineParser>
@@ -118,22 +116,7 @@ int main(int argc, char *argv[])
 
     // Apply the saved color scheme before the first window is created so the
     // window manager sees the correct decoration color on initial mapping.
-    {
-        const int mode = VelaSettings::self()->themeMode();
-        if (mode != 0) {
-            KColorSchemeManager *mgr = KColorSchemeManager::instance();
-            const QString keyword = (mode == 1) ? QStringLiteral("Light")
-                                                : QStringLiteral("Dark");
-            const QAbstractItemModel *model = mgr->model();
-            for (int r = 0; r < model->rowCount(); ++r) {
-                const QModelIndex idx = model->index(r, 0);
-                if (idx.data(Qt::DisplayRole).toString().contains(keyword, Qt::CaseInsensitive)) {
-                    mgr->activateSchemeId(idx.data(KColorSchemeModel::IdRole).toString());
-                    break;
-                }
-            }
-        }
-    }
+    MainWindow::applyColorScheme(VelaSettings::self()->themeMode());
 
     // Before any window or job exists: every progress-reporting job from here on
     // goes through JobTracker, which feeds the Operations window and keeps the

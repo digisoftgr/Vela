@@ -110,6 +110,8 @@ private:
         bool       decodeFailed = false;
         bool       mixedEol = false;
         bool       crlf = false;
+        QDateTime  mtime;           // on-disk state the text was read from
+        qint64     diskSize = -1;
     };
     static ReadResult readFile(const QString &path);
 

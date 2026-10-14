@@ -29,6 +29,18 @@ static void attachUiDelegate(KJob *job, QWidget *window)
     job->setUiDelegate(KIO::createDefaultJobUiDelegate(KJobUiDelegate::AutoHandlingEnabled, window));
 }
 
+QUrl FileOperationsManager::childUrl(const QUrl &dir, const QString &name)
+{
+    // Not "path + '/' + name": at the root that made "//name", which then
+    // matched no listed row.
+    QUrl url = dir;
+    QString path = url.path();
+    if (!path.endsWith(QLatin1Char('/')))
+        path += QLatin1Char('/');
+    url.setPath(path + name);
+    return url;
+}
+
 // ── Public operations ─────────────────────────────────────────────────────────
 
 KIO::CopyJob *FileOperationsManager::copy(const QList<QUrl> &sources, const QUrl &destDir,
@@ -93,8 +105,7 @@ KJob *FileOperationsManager::mkdir(const QUrl &parentDir, const QString &name, Q
 {
     if (name.isEmpty())
         return nullptr;
-    QUrl dest = parentDir.adjusted(QUrl::StripTrailingSlash);
-    dest.setPath(dest.path() + QLatin1Char('/') + name);
+    const QUrl dest = childUrl(parentDir, name);
     auto *job = KIO::mkdir(dest);
     attachUiDelegate(job, window);
     KIO::FileUndoManager::self()->recordJob(KIO::FileUndoManager::Mkdir, {}, dest, job);

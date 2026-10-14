@@ -43,7 +43,7 @@ class ThumbnailLoader;
 // A tab left while showing subfolder-search results. The directory's own
 // selection and scroll live on its history entry; this is only what belongs to
 // the results. Heavy (results can be a whole tree's worth of items), so only the
-// Panel::kMaxTabsWithViewState most recently left tabs keep one.
+// tabs still loaded (Panel::kMaxLoadedTabs) keep one.
 struct TabSearchState {
     ViewPosition position;
     // Whether the search had finished; an unfinished one is re-run instead.
@@ -98,12 +98,13 @@ public:
     // on a row. The last column stretches into everything left of it.
     static constexpr int kTrailingDeadZone = 48;
 
-    // How many recently left tabs keep their full view state (the whole
-    // selection, search results). Older tabs keep only what any history entry
-    // keeps — the topmost selected item and scroll — plus their filter text
-    // and search term: selections and result lists can each be a whole
-    // directory tree's worth of URLs.
-    static constexpr int kMaxTabsWithViewState = 5;
+    // How many tabs have their own model and views loaded at once: the current
+    // one plus the most recently left ones (see TabView in Panel.cpp). Those
+    // also keep their full view state (whole selection, search results). Older
+    // tabs keep only what any history entry keeps — the topmost selected item
+    // and scroll — plus their filter text and search term, and are re-listed
+    // when shown again.
+    static constexpr int kMaxLoadedTabs = 5;
 
     // Details is the tree view; everything else is the QListView in IconMode.
     // There is deliberately no plain "List" mode — Details covers that layout.
@@ -246,6 +247,9 @@ public:
     // Keyboard shortcut targets
     void focusAddressBar();
     void toggleHidden();
+    // Hidden files shown — one setting for the panel, every tab alike.
+    bool showHidden() const;
+    void setShowHidden(bool show);
     void goHome();
     void goRefresh();
 
@@ -324,7 +328,8 @@ private Q_SLOTS:
 
 private:
     void navigate(const QUrl &url, bool takeFocus);
-    void loadUrl(const QUrl &url, bool takeFocus = true);
+    // `reload` bypasses KIO's directory cache (see switchToTab).
+    void loadUrl(const QUrl &url, bool takeFocus = true, bool reload = false);
     // Re-lists the directory if `job` (a trash/delete whose rows were removed
     // optimistically) fails, so files it did not remove reappear.
     void reconcileAfterFailure(KJob *job);
@@ -393,6 +398,7 @@ private:
     // Selects `url`'s row alone and scrolls to it. False when it is not listed.
     bool selectUrl(const QUrl &url);
     void updateHighlightDelegate();
+    void syncCutFromClipboard();
     void startEditingAdjacentItem(int direction); // +1 next, -1 previous
 
     // Rows currently selected, de-duplicated, column 0 only. Cheaper and simpler
@@ -450,6 +456,21 @@ private:
     // Keeps loader size / model enablement in step with the current view mode.
     void applyThumbnailViewMode();
 
+    // ── Per-tab views (see TabView in Panel.cpp) ──────────────────────────────
+    class TabView;
+    TabView *createTabView(quint64 tabId);
+    void     bindTabView(TabView *tv);
+    TabView *viewForTab(quint64 tabId);
+    void     destroyTabView(TabView *tv);
+    void     destroyViewForTab(quint64 tabId);
+    void     copyColumnLayout(TabView *from, TabView *to);
+    void     applyViewSettings(TabView *tv);
+    void     resumeTabView();
+    void     updateEmptyLabel();
+    QList<TabView *> m_views; // every loaded tab's, current included
+    TabView *m_cur = nullptr; // never null after construction
+    QStackedWidget *m_tabStack = nullptr; // one page per TabView
+
     QTabBar        *m_tabBar          = nullptr;
     QFrame         *m_activeIndicator = nullptr;
     BreadcrumbBar  *m_addressBar      = nullptr;
@@ -459,6 +480,7 @@ private:
     QToolButton    *m_btnRefresh      = nullptr;
     QToolButton    *m_btnEmptyTrash   = nullptr;
     KMessageWidget *m_errorWidget     = nullptr;
+    // The current tab's own (aliases set by bindTabView).
     QStackedWidget *m_stack           = nullptr;
     FileTreeView   *m_treeView        = nullptr;
     QListView      *m_listView        = nullptr;
@@ -519,10 +541,13 @@ private:
     ViewMode m_viewMode = Details;
     int m_lastSortCol = FileSystemModel::Name;
     bool m_applyingLockedSort = false;
-    // Directory the locked/default sort was last applied for. It is applied
-    // once per navigation, not on every full re-list: create/paste re-list the
-    // same directory and must not undo a sort the user just picked.
-    QUrl m_lockedSortAppliedFor;
+    // Set by a navigation: the folder whose locked/default sort is applied
+    // when its listing starts. Re-lists (create/paste/F5) leave it empty and
+    // so keep a sort the user just picked.
+    QUrl m_sortPendingFor;
+    // A navigation whose first successful listing has not landed yet.
+    bool m_visitPending = false;
+    void applySortPreference(const QUrl &url);
     // Ctrl+wheel view switching accumulates angle delta until a full notch
     // (120), so a touchpad's stream of small deltas moves one mode, not all.
     int m_zoomWheelAccum = 0;
@@ -537,10 +562,9 @@ private:
     int m_appliedShowHiddenDefault = -1;
     // Last column-visibility set pushed to the header, so repeated calls from
     // modelReset / onDirectoryLoaded become no-ops instead of config reads.
-    QSet<int> m_appliedHiddenColumns;
-    bool      m_appliedHiddenColumnsValid = false;
-    QMetaObject::Connection m_singleClickTreeConn;
-    QMetaObject::Connection m_singleClickListConn;
+    // Panel-wide, applied to every tab's model and proxy.
+    bool m_showHidden   = false;
+    bool m_foldersFirst = true;
 
     // One mechanism for "after the directory loads, do X to these URLs" —
     // used by search-result navigation, create/paste, and Ctrl+N rename alike.

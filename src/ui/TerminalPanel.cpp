@@ -572,9 +572,15 @@ TerminalPanel::Probe TerminalPanel::probe() const
         const int leader = group.contains(fg) ? fg : group.constFirst();
         const QString leaderName = processName(leader);
 
-        const auto anyIn = [&involved](const QSet<QString> &names) -> QString {
-            for (int pid : involved) {
-                const QString name = processName(pid);
+        // Each name is read from /proc once per poll. Matching each name set
+        // in turn used to re-read every process's cmdline up to four times,
+        // every 500 ms, on the GUI thread — for a build, hundreds of processes.
+        QStringList involvedNames;
+        involvedNames.reserve(involved.size());
+        for (int pid : std::as_const(involved))
+            involvedNames.append(processName(pid));
+        const auto anyIn = [&involvedNames](const QSet<QString> &names) -> QString {
+            for (const QString &name : std::as_const(involvedNames)) {
                 if (names.contains(name))
                     return name;
             }

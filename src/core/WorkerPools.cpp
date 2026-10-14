@@ -55,7 +55,11 @@ QThreadPool *search()
 
 QThreadPool *pdf()
 {
-    static QThreadPool *pool = makePool(1);
+    // Several threads: each PdfPreview serialises its own document's renders
+    // with its own lock, so the pool only decides how many *documents* can
+    // make progress at once. With one thread, a single PDF stuck on a hung
+    // mount stalled every PDF preview in the process.
+    static QThreadPool *pool = makePool(4);
     return pool;
 }
 

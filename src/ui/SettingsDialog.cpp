@@ -108,6 +108,7 @@ static void installDesktopFile()
         "StartupWMClass=vela\n"
         "X-DBUS-ServiceName=org.kde.vela\n"
         "X-DBUS-StartupType=Unique\n"
+        "X-Vela-Generated=true\n"
     ).arg(QCoreApplication::applicationFilePath());
 
     QFile f(appsDir + QLatin1Char('/') + kDesktopId);
@@ -115,11 +116,43 @@ static void installDesktopFile()
         f.write(content.toUtf8());
 }
 
+static QString userDesktopFilePath()
+{
+    return QStandardPaths::writableLocation(QStandardPaths::ApplicationsLocation)
+           + QLatin1Char('/') + kDesktopId;
+}
+
+// Only a file Vela wrote itself: the marker, or (written by older versions,
+// without it) the Comment line only that generator used.
+static bool userDesktopFileIsOurs()
+{
+    QFile f(userDesktopFilePath());
+    if (!f.open(QIODevice::ReadOnly))
+        return false;
+    const QByteArray content = f.readAll();
+    return content.contains("X-Vela-Generated=true")
+        || content.contains("Comment=A fast, dual-pane file manager for KDE Plasma");
+}
+
 static void uninstallDesktopFile()
 {
-    const QString appsDir = QStandardPaths::writableLocation(QStandardPaths::ApplicationsLocation);
-    QFile::remove(appsDir + QLatin1Char('/') + kDesktopId);
+    if (!userDesktopFileIsOurs())
+        return; // the user's own override, not ours to delete
+    QFile::remove(userDesktopFilePath());
     QFile::remove(installedIconPath());
+}
+
+// A vela.desktop installed by the package (anywhere but the user's own
+// applications directory).
+static bool packagedDesktopFileExists()
+{
+    const QString user = userDesktopFilePath();
+    const QStringList all = QStandardPaths::locateAll(QStandardPaths::ApplicationsLocation, kDesktopId);
+    for (const QString &path : all) {
+        if (QFileInfo(path).canonicalFilePath() != QFileInfo(user).canonicalFilePath())
+            return true;
+    }
+    return false;
 }
 
 // Non-KDE consumers (GTK apps, xdg-open without KDE) read mimeinfo.cache.
@@ -135,7 +168,15 @@ static void refreshDesktopDatabaseDetached()
 static bool setVelaAsDefault(bool enable)
 {
     if (enable) {
-        installDesktopFile();
+        // The packaged entry when there is one. Writing a user copy always
+        // shadowed it, pinned Exec= to whatever binary was running at the
+        // time, and broke the association once that path moved or the
+        // package was updated. A stale copy from earlier versions goes too.
+        // Only a build with nothing installed (a dev tree) gets a user copy.
+        if (packagedDesktopFileExists())
+            uninstallDesktopFile();
+        else
+            installDesktopFile();
         // In-process sycoca update, so the just-written .desktop file resolves
         // to a KService. Synchronous, but it only runs when the checkbox was
         // actually toggled, not on every Apply.

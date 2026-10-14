@@ -78,6 +78,11 @@ FileSystemModel::FileSystemModel(QObject *parent)
     m_dirLister = new KCoreDirLister(this);
     m_dirLister->setAutoUpdate(true);
     m_dirLister->setShowHiddenFiles(m_showHidden);
+    // Items carry a name-based MIME guess instead of one determined from the
+    // file's contents. Without this, KFileItem::iconName() — called from data()
+    // for every painted icon — read the leading bytes of every extension-less
+    // file on the GUI thread, defeating MimeTypeResolver. Dolphin does the same.
+    m_dirLister->setDelayedMimeTypes(true);
 
     connect(m_dirLister, &KCoreDirLister::itemsAdded,   this, &FileSystemModel::onItemsAdded);
     connect(m_dirLister, &KCoreDirLister::itemsDeleted, this, &FileSystemModel::onItemsDeleted);
@@ -85,9 +90,24 @@ FileSystemModel::FileSystemModel(QObject *parent)
     connect(m_dirLister, &KCoreDirLister::clear,        this, &FileSystemModel::onListerClear);
     connect(m_dirLister, &KCoreDirLister::completed,    this, &FileSystemModel::onListerCompleted);
     connect(m_dirLister, &KCoreDirLister::jobError, this, [this](KIO::Job *job) {
-        m_listingError = true;
         m_fastRelistRunning = false; // its completed() will not come through
-        Q_EMIT directoryError(job ? job->errorString() : i18n("Could not read the directory."));
+        const QString message = job ? job->errorString() : i18n("Could not read the directory.");
+        if (m_initialLoading) {
+            // The listing itself failed: the rows are not the directory.
+            m_listingError = true;
+            Q_EMIT directoryError(message);
+            return;
+        }
+        // A re-list of a directory that did list. The rows on screen are still
+        // the last good listing, so this is not a listing failure: marking it
+        // one put a banner over valid rows and stopped live updates until the
+        // next navigation (a hiccup on a network mount was enough). Report it
+        // only when the user asked for the re-list, and let the existence check
+        // decide whether the directory is really gone.
+        const bool explicitReload = std::exchange(m_emitFullOnNextCompleted, false);
+        if (explicitReload)
+            Q_EMIT directoryError(message);
+        revalidateDirectory();
     });
 
     // KCoreDirLister watches the directory's *contents* and reports per-file
@@ -143,6 +163,8 @@ void FileSystemModel::setDirectory(const QUrl &url, bool reload)
 
     m_currentDir = url;
     m_listingError = false;
+    m_frozen = false;
+    m_dirLister->setAutoUpdate(true);
     m_initialLoading = true; // suppress per-batch refresh signals during the bulk load
 
     // Reset rows immediately for a snappy navigation. The lister will also emit
@@ -231,6 +253,8 @@ void FileSystemModel::watchCurrentDirectory()
 
 void FileSystemModel::onFastWatchFired()
 {
+    if (m_frozen)
+        return;
     if (m_fastPaused) {
         m_fastResumeTimer->start(); // not quiet yet
         return;
@@ -250,6 +274,36 @@ void FileSystemModel::refreshSoon()
     // resume. KIO's own path shows the change meanwhile.
     if (!m_fastPaused)
         onFastWatchFired();
+}
+
+void FileSystemModel::relistLight()
+{
+    if (!m_currentDir.isValid() || m_frozen)
+        return;
+    m_dirLister->updateDirectory(m_currentDir);
+}
+
+void FileSystemModel::setFrozen(bool frozen)
+{
+    if (m_frozen == frozen)
+        return;
+    m_frozen = frozen;
+    if (frozen) {
+        m_dirLister->setAutoUpdate(false);
+        if (m_initialLoading)
+            m_dirLister->stop(); // incomplete: needsReload() stays true
+        cancelAllFolderSizeJobs();
+        resetFastPickup();
+        if (!m_fastWatchedPath.isEmpty())
+            releaseFastWatch(m_fastWatchedPath);
+        m_fastWatchedPath.clear();
+        if (!m_watchedPath.isEmpty())
+            m_dirWatch->removeDir(m_watchedPath);
+        m_watchedPath.clear();
+        return;
+    }
+    m_dirLister->setAutoUpdate(true);
+    watchCurrentDirectory();
 }
 
 void FileSystemModel::pauseFastPickup()
@@ -275,7 +329,7 @@ void FileSystemModel::startFastRelist()
 {
     // The initial load is still streaming in (it will show the change itself),
     // or there is nothing valid to re-list.
-    if (m_initialLoading || m_listingError || !m_currentDir.isValid())
+    if (m_frozen || m_initialLoading || m_listingError || !m_currentDir.isValid())
         return;
     m_fastRelistRunning = true;
     m_fastRelistStartedMs = m_clock.elapsed();
@@ -390,6 +444,9 @@ void FileSystemModel::schedulePumpFolderSizeQueue()
 
 void FileSystemModel::requestAllFolderSizes()
 {
+    m_autoFolderSizes = true;
+    if (m_frozen)
+        return; // queued again on thaw by the panel
     for (const KFileItem &item : std::as_const(m_items)) {
         if (item.isDir())
             enqueueFolderSize(item.url());
@@ -409,7 +466,8 @@ void FileSystemModel::enqueueFolderSize(const QUrl &url)
 
 void FileSystemModel::pumpFolderSizeQueue()
 {
-    while (m_runningSizeJobs.size() < kMaxConcurrentSizeJobs && !m_sizeQueue.isEmpty()) {
+    while (!m_frozen && m_runningSizeJobs.size() < kMaxConcurrentSizeJobs
+           && !m_sizeQueue.isEmpty()) {
         const QUrl url = m_sizeQueue.takeFirst();
         m_queuedSizes.remove(url);
 
@@ -439,6 +497,7 @@ void FileSystemModel::cancelAllFolderSizeJobs()
 
 void FileSystemModel::clearFolderSizes()
 {
+    m_autoFolderSizes = false;
     cancelAllFolderSizeJobs();
 
     if (m_folderSizes.isEmpty())
@@ -570,6 +629,16 @@ void FileSystemModel::onItemsAdded(const QUrl &, const KFileItemList &items)
     }
     appendItems(toAppend);
 
+    // A folder that appeared while sizes are on gets one too. (During the
+    // initial load the panel requests them all once the listing completes.)
+    if (m_autoFolderSizes && !m_initialLoading) {
+        for (const KFileItem &it : items) {
+            if (it.isDir())
+                enqueueFolderSize(it.url());
+        }
+        pumpFolderSizeQueue();
+    }
+
     // Live addition (a file appeared while viewing) — refresh counts / empty label.
     // Suppressed during the initial bulk load; completed() drives that once.
     if (m_listingError)
@@ -629,7 +698,13 @@ void FileSystemModel::onRefreshItems(const QList<QPair<KFileItem, KFileItem>> &i
         }
         replaceItemAt(row, newItem);
         Q_EMIT dataChanged(createIndex(row, 0), createIndex(row, ColumnCount - 1));
+        // Its size was just dropped as possibly stale; with sizes on, compute
+        // the new one rather than leaving the cell blank until the next visit.
+        if (m_autoFolderSizes && newItem.isDir())
+            enqueueFolderSize(newItem.url());
     }
+    if (m_autoFolderSizes)
+        pumpFolderSizeQueue();
 }
 
 void FileSystemModel::onListerClear()

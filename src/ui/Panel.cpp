@@ -157,12 +157,8 @@ Panel::Panel(QWidget *parent)
     m_errorWidget->hide();
     layout->addWidget(m_errorWidget);
 
-    // Models
-    m_model = new FileSystemModel(this);
-
-    m_proxyModel = new FileFilterProxyModel(this);
-    m_proxyModel->setSourceModel(m_model);
-
+    // Models. The directory model, its proxy and the views are per tab (see
+    // createTabView); search results belong to the panel.
     m_searchResultsModel = new SearchResultsModel(this);
     m_searchProxyModel = new FileFilterProxyModel(this);
     m_searchProxyModel->setSourceModel(m_searchResultsModel);
@@ -177,7 +173,6 @@ Panel::Panel(QWidget *parent)
     // themselves live in a process-wide store, so panels also share each
     // other's results.
     m_thumbLoader = new ThumbnailLoader(this);
-    m_model->setThumbnailLoader(m_thumbLoader);
     m_searchResultsModel->setThumbnailLoader(m_thumbLoader);
 
     // One thumbnail size for every icon mode, deliberately, and set once here
@@ -200,89 +195,18 @@ Panel::Panel(QWidget *parent)
     // Highlight delegate (applied to Name column in both views)
     m_delegate = new MatchHighlightDelegate(this);
 
-    // Details view
-    m_treeView = new FileTreeView(this);
-    auto *lockHeader = new SortLockHeaderView(Qt::Horizontal, m_treeView);
-    m_treeView->setHeader(lockHeader);
-    m_treeView->setModel(m_proxyModel);
-    connect(m_proxyModel, &QAbstractItemModel::modelReset, this, &Panel::applyColumnSettings);
-    m_treeView->setRootIsDecorated(false);
-    m_treeView->setUniformRowHeights(true);
-    m_treeView->setSortingEnabled(true);
-    m_treeView->sortByColumn(FileSystemModel::Name, Qt::AscendingOrder);
-
-    // When switching to a new column, override Qt's default Ascending order:
-    // date and size columns should default to Descending (latest/largest first).
-    // Skip the override when we are restoring the locked sort for a directory.
-    connect(lockHeader, &QHeaderView::sortIndicatorChanged,
-            this, [this](int col, Qt::SortOrder order) {
-        if (m_applyingLockedSort)
-            return;
-        if (col == m_lastSortCol || order != Qt::AscendingOrder)
-            return; // same column toggled, or already descending — nothing to override
-        m_lastSortCol = col;
-        const bool wantDescending =
-            col == FileSystemModel::DateModified ||
-            col == FileSystemModel::DateCreated  ||
-            col == FileSystemModel::DateAccessed ||
-            col == FileSystemModel::Size;
-        if (wantDescending)
-            m_treeView->sortByColumn(col, Qt::DescendingOrder);
-    });
-    connect(lockHeader, &SortLockHeaderView::lockClicked,
-            this, &Panel::onLockClicked);
-    m_treeView->setSelectionMode(QAbstractItemView::ExtendedSelection);
-    m_treeView->setAlternatingRowColors(VelaSettings::self()->alternatingRowColors());
-    m_treeView->setIconSize(QSize(16, 16));
-    // Qt's own stretch is off: it runs the last section all the way to the right
-    // edge, leaving no space that belongs to no column. stretchLastColumn() does
-    // the same job but stops kTrailingDeadZone short, so there is always a strip
-    // where QTreeView::indexAt() returns an invalid index — which is what turns a
-    // right-click there into the directory's background menu.
-    lockHeader->setStretchLastSection(false);
-    lockHeader->setSectionResizeMode(QHeaderView::Interactive);
-    lockHeader->setSectionsMovable(true);
-    lockHeader->setContextMenuPolicy(Qt::CustomContextMenu);
-    m_treeView->setDragEnabled(true);
-    m_treeView->setAcceptDrops(true);
-    m_treeView->setDropIndicatorShown(true);
-    m_treeView->setDragDropMode(QAbstractItemView::DragDrop);
-    m_treeView->setDefaultDropAction(Qt::MoveAction);
-    m_treeView->setEditTriggers(QAbstractItemView::NoEditTriggers);
-    m_treeView->setItemDelegateForColumn(FileSystemModel::Name, m_delegate);
-    m_treeView->installEventFilter(this);
-    m_treeView->viewport()->installEventFilter(this);
-
-    // List / icon view
-    m_listView = new QListView(this);
-    m_listView->setModel(m_proxyModel);
-    m_listView->setSelectionMode(QAbstractItemView::ExtendedSelection);
-    m_listView->setSelectionRectVisible(true); // Qt's band is there; this just draws it
-    m_listView->setUniformItemSizes(true);
-    m_listView->setWordWrap(true);
-    m_listView->setDragEnabled(true);
-    m_listView->setAcceptDrops(true);
-    m_listView->setDropIndicatorShown(true);
-    m_listView->setDragDropMode(QAbstractItemView::DragDrop);
-    m_listView->setDefaultDropAction(Qt::MoveAction);
-    m_listView->setEditTriggers(QAbstractItemView::NoEditTriggers);
-    m_listView->setItemDelegate(m_delegate);
-    m_listView->installEventFilter(this);
-    m_listView->viewport()->installEventFilter(this);
-
-    // Stacked widget
-    m_stack = new QStackedWidget(this);
-    m_stack->addWidget(m_treeView);
-    m_stack->addWidget(m_listView);
-    layout->addWidget(m_stack, 1);
+    // One page per loaded tab (see TabView): each holds that tab's own details
+    // and icon views over its own model.
+    m_tabStack = new QStackedWidget(this);
+    layout->addWidget(m_tabStack, 1);
 
     // Empty-directory overlay
-    m_emptyDirLabel = new QLabel(i18n("This folder is empty"), m_stack);
+    m_emptyDirLabel = new QLabel(i18n("This folder is empty"), m_tabStack);
     m_emptyDirLabel->setAlignment(Qt::AlignCenter);
     m_emptyDirLabel->setAttribute(Qt::WA_TransparentForMouseEvents);
     m_emptyDirLabel->setStyleSheet(QStringLiteral("color: palette(placeholderText); font-size: 13px;"));
     m_emptyDirLabel->hide();
-    m_stack->installEventFilter(this);
+    m_tabStack->installEventFilter(this);
 
     // Filter bar (hidden by default, appears between stack and status bar)
     m_filterBar = new FilterBar(this);
@@ -301,13 +225,10 @@ Panel::Panel(QWidget *parent)
     // ── Connections ──────────────────────────────────────────────────────────
 
     connect(QGuiApplication::clipboard(), &QClipboard::changed, this, [this](QClipboard::Mode mode) {
-        if (mode != QClipboard::Clipboard) return;
-        const QMimeData *mime = QGuiApplication::clipboard()->mimeData();
-        if (!mime || mime->data(QStringLiteral("x-kde-cut-selection")) != QByteArray("1")) {
-            m_delegate->clearCutUrls();
-            currentView()->viewport()->update();
-        }
+        if (mode == QClipboard::Clipboard)
+            syncCutFromClipboard();
     });
+    syncCutFromClipboard();
 
     connect(m_addressBar, &BreadcrumbBar::urlActivated, this, &Panel::navigateTo);
     connect(m_addressBar, &BreadcrumbBar::urlActivatedInNewTab, this, &Panel::newTab);
@@ -340,58 +261,6 @@ Panel::Panel(QWidget *parent)
         updateNavBtns();
         m_btnEmptyTrash->setVisible(url.scheme() == QLatin1String("trash"));
     });
-    connect(m_treeView, &QTreeView::activated, this, &Panel::onItemActivated);
-    connect(m_listView, &QListView::activated, this, &Panel::onItemActivated);
-    connect(m_model, &FileSystemModel::directoryLoaded, this, &Panel::onDirectoryLoaded);
-    connect(m_model, &FileSystemModel::directoryRefreshed, this, [this](const QUrl &) {
-        // Incremental live update: refresh counts and the empty-folder overlay only.
-        // Selection, scroll position, and unchanged rows are deliberately left alone.
-        if (m_inSearchMode)
-            return;
-        updateStatusBar();
-        // A create/paste may be waiting for its items to arrive.
-        if (m_pendingFallback->isActive())
-            resolvePendingIfListed();
-        const bool empty = (m_model->rowCount() == 0 && !m_model->hasListingError());
-        if (empty)
-            m_emptyDirLabel->setGeometry(m_stack->rect());
-        m_emptyDirLabel->setVisible(empty);
-        if (empty)
-            m_emptyDirLabel->raise();
-    });
-    connect(m_model, &FileSystemModel::loadingProgress, this, &Panel::onLoadingProgress);
-    connect(m_model, &FileSystemModel::loadingStarted, this, [this](const QUrl &) {
-        // A fresh navigation: drop any indicator left over from the last one.
-        // Deliberately no indicator yet — a small directory finishes before the
-        // threshold is reached and its status line never changes appearance.
-        stopLoadingIndicator();
-        if (m_errorWidget->isVisible())
-            m_errorWidget->animatedHide();
-        m_emptyDirLabel->hide();
-    });
-    connect(m_model, &FileSystemModel::directoryError, this, [this](const QString &message) {
-        stopLoadingIndicator();
-        // A directory that failed or vanished has no rows, but that is "unknown",
-        // not "empty" — the two overlays must never be shown together.
-        m_emptyDirLabel->hide();
-        m_errorWidget->setText(message);
-        m_errorWidget->animatedShow();
-    });
-    connect(m_model, &FileSystemModel::renamedTo, this, [this](const QUrl &newUrl) {
-        // Re-select the renamed item. The model row already has the new URL
-        // (in-place update), so it resolves directly through the URL index.
-        const int row = m_model->rowForUrl(newUrl);
-        if (row < 0)
-            return;
-        const QModelIndex proxy = m_proxyModel->mapFromSource(m_model->index(row, 0));
-        if (!proxy.isValid())
-            return;
-        currentView()->selectionModel()->select(
-            proxy, QItemSelectionModel::ClearAndSelect | QItemSelectionModel::Rows);
-        currentView()->setCurrentIndex(proxy);
-        currentView()->scrollTo(proxy);
-    });
-
     // Selection changes only move the status line, which nobody can read
     // mid-drag anyway. Restarting on each change means a rubber-band sweep or a
     // held Shift+Down sums once, when it settles.
@@ -410,11 +279,6 @@ Panel::Panel(QWidget *parent)
         refreshStatusText();
     });
 
-    connect(m_treeView->selectionModel(), &QItemSelectionModel::selectionChanged,
-            this, &Panel::onSelectionChanged);
-    connect(m_listView->selectionModel(), &QItemSelectionModel::selectionChanged,
-            this, &Panel::onSelectionChanged);
-
     // Dragging a divider emits sectionResized for every pixel of the drag, and
     // the destination is a config file — so coalesce, and write only what the
     // user did, never the programmatic resizes that restore or hide a column.
@@ -422,17 +286,6 @@ Panel::Panel(QWidget *parent)
     m_columnWidthSave->setSingleShot(true);
     m_columnWidthSave->setInterval(500);
     connect(m_columnWidthSave, &QTimer::timeout, this, &Panel::saveColumnWidthsGlobally);
-    connect(m_treeView->header(), &QHeaderView::sectionResized, this,
-            [this](int, int, int) {
-        if (m_applyingColumnWidths)
-            return; // our own stretch, not a drag
-        m_columnWidthSave->start();
-        // Widening one column eats into the space the last one may occupy.
-        stretchLastColumn();
-    });
-
-    connect(m_treeView->header(), &QHeaderView::customContextMenuRequested,
-            this, &Panel::onHeaderContextMenu);
     connect(m_tabBar, &QTabBar::currentChanged, this, &Panel::onTabChanged);
     connect(m_tabBar, &QTabBar::tabCloseRequested, this, &Panel::onTabCloseRequested);
     connect(m_tabBar, &QTabBar::tabMoved, this, [this](int from, int to) {
@@ -441,16 +294,6 @@ Panel::Panel(QWidget *parent)
     });
     connect(m_tabBar, &QTabBar::customContextMenuRequested,
             this, &Panel::onTabContextMenu);
-
-    // Context menus on views
-    m_treeView->setContextMenuPolicy(Qt::CustomContextMenu);
-    m_listView->setContextMenuPolicy(Qt::CustomContextMenu);
-    connect(m_treeView, &QTreeView::customContextMenuRequested, this, [this](const QPoint &pos) {
-        showContextMenu(m_treeView, pos);
-    });
-    connect(m_listView, &QListView::customContextMenuRequested, this, [this](const QPoint &pos) {
-        showContextMenu(m_listView, pos);
-    });
 
     // Rename tab-navigation
     connect(m_delegate, &MatchHighlightDelegate::tabToNext,
@@ -486,21 +329,8 @@ Panel::Panel(QWidget *parent)
     // Only the list view: thumbnails exist only in the icon modes, so wiring the
     // tree's scrollbar here just meant signal traffic on every Details scroll
     // for a slot that always returned immediately.
-    connect(m_listView->verticalScrollBar(), &QAbstractSlider::valueChanged,
-            this, &Panel::scheduleThumbnailUpdate);
-    // Batched layout positions items over several event-loop passes, and there
-    // is no "layout finished" signal. The scroll range grows as each batch is
-    // placed, so it doubles as one: without this, a mode switch could run its
-    // single thumbnail pass before anything had geometry, find nothing visible,
-    // and never look again.
-    connect(m_listView->verticalScrollBar(), &QAbstractSlider::rangeChanged,
-            this, &Panel::scheduleThumbnailUpdate);
-    // Rows arriving (directory load, live update, search results) can land
-    // inside the visible range.
-    connect(m_proxyModel, &QAbstractItemModel::modelReset,
-            this, &Panel::scheduleThumbnailUpdate);
-    connect(m_proxyModel, &QAbstractItemModel::rowsInserted,
-            this, &Panel::scheduleThumbnailUpdate);
+    // (The list views' scroll bars and each tab's proxy are wired per tab, in
+    // createTabView.)
     connect(m_searchProxyModel, &QAbstractItemModel::modelReset,
             this, &Panel::scheduleThumbnailUpdate);
     connect(m_searchProxyModel, &QAbstractItemModel::rowsInserted,
@@ -543,6 +373,10 @@ Panel::Panel(QWidget *parent)
 
     // Search engine (queued automatically since signal emitted from background thread)
     connect(m_searchEngine, &SearchEngine::resultsBatch, this, &Panel::onSearchResultsBatch);
+    connect(m_searchEngine, &SearchEngine::limitReached, this, [this]() {
+        m_filterBar->setHint(i18n("Showing the first %1 results — refine the search term",
+                                  SearchEngine::kMaxResults));
+    });
     // A tab's search re-run on switching back: its selection and scroll apply
     // once the results are all in.
     connect(m_searchEngine, &SearchEngine::finished, this, [this]() {
@@ -551,6 +385,10 @@ Panel::Panel(QWidget *parent)
     });
 
     setupFileOpShortcuts();
+
+    // Never without a current view: an unassigned one until the first tab
+    // claims it (restoreSettings seeds its header before that happens).
+    bindTabView(createTabView(0));
 }
 
 Panel *Panel::createEmbedded(std::function<Panel *()> tabHost, QWidget *parent)
@@ -582,6 +420,423 @@ void Panel::startEmbedded(const QUrl &url, const QUrl &reveal)
     if (reveal.isValid())
         ctx.reveal = {reveal};
     insertTab(ctx);
+}
+
+// What is dimmed as "cut" is whatever the clipboard holds as a cut — in every
+// panel, whichever one did the cutting. Keeping a per-panel set meant a second
+// cut elsewhere left the first panel dimming items no longer on the clipboard.
+void Panel::syncCutFromClipboard()
+{
+    const QMimeData *mime = QGuiApplication::clipboard()->mimeData();
+    if (mime && mime->data(QStringLiteral("x-kde-cut-selection")) == QByteArray("1")) {
+        const QList<QUrl> urls = mime->urls();
+        m_delegate->setCutUrls(QSet<QUrl>(urls.cbegin(), urls.cend()));
+    } else {
+        m_delegate->clearCutUrls();
+    }
+    if (QAbstractItemView *view = currentView())
+        view->viewport()->update();
+}
+
+// ── Per-tab views ─────────────────────────────────────────────────────────────
+//
+// Like Dolphin, every tab has its own model and views, so going back to a tab
+// shows it as it was — rows, selection, scroll — instead of re-listing and
+// re-sorting the folder through one shared model. At most kMaxLoadedTabs exist
+// at once: the current tab's and those of the most recently left ones. A tab
+// that falls out of that set loses its views and is rebuilt (from its history
+// entry's stored position) when it is shown again.
+//
+// A tab that is not shown is frozen: no directory watch, no auto-update, no
+// folder-size jobs. Coming back thaws it and re-lists the differences.
+//
+// m_model, m_proxyModel, m_treeView, m_listView and m_stack always point at
+// the current tab's (bindTabView). Every per-tab connection ignores signals
+// from a tab that is not the current one.
+
+class Panel::TabView : public QObject
+{
+public:
+    using QObject::QObject;
+
+    quint64 tabId = 0; // 0: not (yet) a tab's — the panel's initial view
+    FileSystemModel      *model = nullptr;
+    FileFilterProxyModel *proxy = nullptr;
+    FileTreeView         *tree  = nullptr;
+    QListView            *list  = nullptr;
+    QStackedWidget       *stack = nullptr; // [tree, list]; a page of m_tabStack
+    QString               error; // the banner text of a failed listing
+    QMetaObject::Connection singleClickTree;
+    QMetaObject::Connection singleClickList;
+    QSet<int> appliedHiddenColumns;
+    bool      appliedHiddenColumnsValid = false;
+};
+
+Panel::TabView *Panel::createTabView(quint64 tabId)
+{
+    auto *stack = new QStackedWidget(m_tabStack);
+    auto *tv = new TabView(stack);
+    tv->tabId = tabId;
+    tv->stack = stack;
+    const auto current = [this, tv]() { return tv == m_cur; };
+
+    tv->model = new FileSystemModel(stack);
+    tv->model->setThumbnailLoader(m_thumbLoader);
+    tv->model->setShowHidden(m_showHidden);
+    tv->model->setFoldersFirst(m_foldersFirst);
+
+    tv->proxy = new FileFilterProxyModel(stack);
+    tv->proxy->setSourceModel(tv->model);
+    tv->proxy->setFoldersFirst(m_foldersFirst);
+
+    // Details view
+    tv->tree = new FileTreeView(stack);
+    FileTreeView *tree = tv->tree;
+    auto *lockHeader = new SortLockHeaderView(Qt::Horizontal, tree);
+    tree->setHeader(lockHeader);
+    tree->setModel(tv->proxy);
+    tree->setRootIsDecorated(false);
+    tree->setUniformRowHeights(true);
+    tree->setSortingEnabled(true);
+    tree->sortByColumn(FileSystemModel::Name, Qt::AscendingOrder);
+    tree->setSelectionMode(QAbstractItemView::ExtendedSelection);
+    tree->setAlternatingRowColors(VelaSettings::self()->alternatingRowColors());
+    tree->setIconSize(QSize(16, 16));
+    // Qt's own stretch is off: it runs the last section all the way to the right
+    // edge, leaving no space that belongs to no column. stretchLastColumn() does
+    // the same job but stops kTrailingDeadZone short, so there is always a strip
+    // where QTreeView::indexAt() returns an invalid index — which is what turns a
+    // right-click there into the directory's background menu.
+    lockHeader->setStretchLastSection(false);
+    lockHeader->setSectionResizeMode(QHeaderView::Interactive);
+    lockHeader->setSectionsMovable(true);
+    lockHeader->setContextMenuPolicy(Qt::CustomContextMenu);
+    tree->setDragEnabled(true);
+    tree->setAcceptDrops(true);
+    tree->setDropIndicatorShown(true);
+    tree->setDragDropMode(QAbstractItemView::DragDrop);
+    tree->setDefaultDropAction(Qt::MoveAction);
+    tree->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    tree->setItemDelegateForColumn(FileSystemModel::Name, m_delegate);
+    tree->setContextMenuPolicy(Qt::CustomContextMenu);
+    tree->installEventFilter(this);
+    tree->viewport()->installEventFilter(this);
+
+    // List / icon view
+    tv->list = new QListView(stack);
+    QListView *list = tv->list;
+    list->setModel(tv->proxy);
+    list->setSelectionMode(QAbstractItemView::ExtendedSelection);
+    list->setSelectionRectVisible(true); // Qt's band is there; this just draws it
+    list->setUniformItemSizes(true);
+    list->setWordWrap(true);
+    list->setDragEnabled(true);
+    list->setAcceptDrops(true);
+    list->setDropIndicatorShown(true);
+    list->setDragDropMode(QAbstractItemView::DragDrop);
+    list->setDefaultDropAction(Qt::MoveAction);
+    list->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    list->setItemDelegate(m_delegate);
+    list->setContextMenuPolicy(Qt::CustomContextMenu);
+    list->installEventFilter(this);
+    list->viewport()->installEventFilter(this);
+
+    if (m_embedded) {
+        // Frameless like the preview's snapshot it replaces, so the swap does
+        // not shift the rows by the frame's width.
+        tree->setFrameShape(QFrame::NoFrame);
+        list->setFrameShape(QFrame::NoFrame);
+    }
+
+    stack->addWidget(tree);
+    stack->addWidget(list);
+    m_tabStack->addWidget(stack);
+
+    // Columns as the panel shows them now: one layout per panel, not per tab.
+    if (m_cur)
+        copyColumnLayout(m_cur, tv);
+
+    // ── Header ───────────────────────────────────────────────────────────────
+    // When switching to a new column, override Qt's default Ascending order:
+    // date and size columns should default to Descending (latest/largest first).
+    // Skip the override when we are restoring the locked sort for a directory.
+    connect(lockHeader, &QHeaderView::sortIndicatorChanged, tv,
+            [this, current, tree](int col, Qt::SortOrder order) {
+        if (!current() || m_applyingLockedSort)
+            return;
+        if (col == m_lastSortCol || order != Qt::AscendingOrder)
+            return; // same column toggled, or already descending — nothing to override
+        m_lastSortCol = col;
+        const bool wantDescending =
+            col == FileSystemModel::DateModified ||
+            col == FileSystemModel::DateCreated  ||
+            col == FileSystemModel::DateAccessed ||
+            col == FileSystemModel::Size;
+        if (wantDescending)
+            tree->sortByColumn(col, Qt::DescendingOrder);
+    });
+    connect(lockHeader, &SortLockHeaderView::lockClicked, tv, [this, current](int section) {
+        if (current())
+            onLockClicked(section);
+    });
+    // Dragging a divider emits sectionResized for every pixel of the drag, and
+    // the destination is a config file — so coalesce, and write only what the
+    // user did, never the programmatic resizes that restore or hide a column.
+    connect(lockHeader, &QHeaderView::sectionResized, tv, [this, current](int, int, int) {
+        if (!current() || m_applyingColumnWidths)
+            return; // another tab's, or our own stretch — not a drag
+        m_columnWidthSave->start();
+        // Widening one column eats into the space the last one may occupy.
+        stretchLastColumn();
+    });
+    connect(lockHeader, &QHeaderView::customContextMenuRequested, tv,
+            [this, current](const QPoint &pos) {
+        if (current())
+            onHeaderContextMenu(pos);
+    });
+
+    // ── Views ────────────────────────────────────────────────────────────────
+    connect(tree, &QTreeView::activated, this, &Panel::onItemActivated);
+    connect(list, &QListView::activated, this, &Panel::onItemActivated);
+    connect(tree, &QTreeView::customContextMenuRequested, tv, [this, tree](const QPoint &pos) {
+        showContextMenu(tree, pos);
+    });
+    connect(list, &QListView::customContextMenuRequested, tv, [this, list](const QPoint &pos) {
+        showContextMenu(list, pos);
+    });
+    connect(tree->selectionModel(), &QItemSelectionModel::selectionChanged,
+            this, &Panel::onSelectionChanged);
+    connect(list->selectionModel(), &QItemSelectionModel::selectionChanged,
+            this, &Panel::onSelectionChanged);
+    applyViewSettings(tv);
+
+    // Thumbnails: only the list view — thumbnails exist only in the icon modes.
+    // Batched layout positions items over several event-loop passes with no
+    // "layout finished" signal; the growing scroll range doubles as one.
+    const auto thumbs = [this, current]() {
+        if (current())
+            scheduleThumbnailUpdate();
+    };
+    connect(list->verticalScrollBar(), &QAbstractSlider::valueChanged, tv, thumbs);
+    connect(list->verticalScrollBar(), &QAbstractSlider::rangeChanged, tv, thumbs);
+    // Rows arriving (directory load, live update) can land in the visible range.
+    connect(tv->proxy, &QAbstractItemModel::modelReset, tv, [this, current]() {
+        if (!current())
+            return;
+        applyColumnSettings();
+        scheduleThumbnailUpdate();
+    });
+    connect(tv->proxy, &QAbstractItemModel::rowsInserted, tv, thumbs);
+
+    // ── Model ────────────────────────────────────────────────────────────────
+    FileSystemModel *model = tv->model;
+    connect(model, &FileSystemModel::directoryLoaded, tv, [this, current](const QUrl &url) {
+        if (current())
+            onDirectoryLoaded(url);
+    });
+    connect(model, &FileSystemModel::directoryRefreshed, tv, [this, current](const QUrl &) {
+        // Incremental live update: refresh counts and the empty-folder overlay only.
+        // Selection, scroll position, and unchanged rows are deliberately left alone.
+        if (!current() || m_inSearchMode)
+            return;
+        updateStatusBar();
+        // A create/paste may be waiting for its items to arrive.
+        if (m_pendingFallback->isActive())
+            resolvePendingIfListed();
+        updateEmptyLabel();
+    });
+    connect(model, &FileSystemModel::loadingProgress, tv, [this, current](int rows) {
+        if (current())
+            onLoadingProgress(rows);
+    });
+    connect(model, &FileSystemModel::loadingStarted, tv, [this, current, tv](const QUrl &url) {
+        tv->error.clear();
+        if (!current())
+            return;
+        // The rows were just cleared and none have arrived: sorting now is
+        // free, and the listing streams in already in its final order. Sorting
+        // after the load re-sorted every row and made them jump (Downloads
+        // re-ordering by date once full).
+        if (m_sortPendingFor.isValid() && m_sortPendingFor == url) {
+            m_sortPendingFor.clear();
+            applySortPreference(url);
+        }
+        // A fresh navigation: drop any indicator left over from the last one.
+        // Deliberately no indicator yet — a small directory finishes before the
+        // threshold is reached and its status line never changes appearance.
+        stopLoadingIndicator();
+        if (m_errorWidget->isVisible())
+            m_errorWidget->animatedHide();
+        m_emptyDirLabel->hide();
+    });
+    connect(model, &FileSystemModel::directoryError, tv,
+            [this, current, tv](const QString &message) {
+        tv->error = message; // shown again when the tab is
+        if (!current())
+            return;
+        stopLoadingIndicator();
+        // A directory that failed or vanished has no rows, but that is "unknown",
+        // not "empty" — the two overlays must never be shown together.
+        m_emptyDirLabel->hide();
+        m_errorWidget->setText(message);
+        m_errorWidget->animatedShow();
+    });
+    connect(model, &FileSystemModel::renamedTo, tv, [this, current](const QUrl &newUrl) {
+        if (!current())
+            return;
+        // Re-select the renamed item. The model row already has the new URL
+        // (in-place update), so it resolves directly through the URL index.
+        const int row = m_model->rowForUrl(newUrl);
+        if (row < 0)
+            return;
+        const QModelIndex proxy = m_proxyModel->mapFromSource(m_model->index(row, 0));
+        if (!proxy.isValid())
+            return;
+        currentView()->selectionModel()->select(
+            proxy, QItemSelectionModel::ClearAndSelect | QItemSelectionModel::Rows);
+        currentView()->setCurrentIndex(proxy);
+        currentView()->scrollTo(proxy);
+    });
+
+    m_views.append(tv);
+    return tv;
+}
+
+void Panel::bindTabView(TabView *tv)
+{
+    m_cur        = tv;
+    m_model      = tv->model;
+    m_proxyModel = tv->proxy;
+    m_treeView   = tv->tree;
+    m_listView   = tv->list;
+    m_stack      = tv->stack;
+    m_tabStack->setCurrentWidget(tv->stack);
+    // Each tab's header keeps its own sort; the descending-by-default rule for
+    // dates and sizes compares against the one shown.
+    m_lastSortCol = tv->tree->header()->sortIndicatorSection();
+}
+
+// The tab's existing views, the panel's still unclaimed initial one, or new.
+Panel::TabView *Panel::viewForTab(quint64 tabId)
+{
+    for (TabView *tv : std::as_const(m_views)) {
+        if (tv->tabId == tabId)
+            return tv;
+    }
+    for (TabView *tv : std::as_const(m_views)) {
+        if (tv->tabId == 0) {
+            tv->tabId = tabId;
+            return tv;
+        }
+    }
+    return createTabView(tabId);
+}
+
+void Panel::destroyTabView(TabView *tv)
+{
+    if (!tv || tv == m_cur)
+        return;
+    m_views.removeOne(tv);
+    tv->model->setFrozen(true); // stop listing, watching and size jobs now
+    m_tabStack->removeWidget(tv->stack);
+    tv->stack->hide();
+    // Later: this can run from inside a signal of something the views hold.
+    // Until then every connection's current() check fails, so it stays inert.
+    tv->stack->deleteLater();
+}
+
+void Panel::destroyViewForTab(quint64 tabId)
+{
+    for (TabView *tv : std::as_const(m_views)) {
+        if (tv->tabId == tabId) {
+            destroyTabView(tv);
+            return;
+        }
+    }
+}
+
+// Visibility, widths and order of the columns. Not the sort: that is the
+// folder's own (its locked/default preference, or what the user picked there).
+void Panel::copyColumnLayout(TabView *from, TabView *to)
+{
+    if (!from || !to || from == to)
+        return;
+    QHeaderView *src = from->tree->header();
+    QHeaderView *dst = to->tree->header();
+    const bool wasApplying = m_applyingColumnWidths;
+    m_applyingColumnWidths = true;
+    for (int visual = 0; visual < src->count(); ++visual) {
+        const int logical = src->logicalIndex(visual);
+        const int at = dst->visualIndex(logical);
+        if (at != visual)
+            dst->moveSection(at, visual);
+    }
+    for (int i = 0; i < src->count(); ++i) {
+        dst->setSectionHidden(i, src->isSectionHidden(i));
+        if (!src->isSectionHidden(i))
+            dst->resizeSection(i, src->sectionSize(i));
+    }
+    m_applyingColumnWidths = wasApplying;
+    to->appliedHiddenColumns      = from->appliedHiddenColumns;
+    to->appliedHiddenColumnsValid = from->appliedHiddenColumnsValid;
+}
+
+// Per-view settings from VelaSettings: row colours and single-click opening.
+void Panel::applyViewSettings(TabView *tv)
+{
+    VelaSettings *s = VelaSettings::self();
+    tv->tree->setAlternatingRowColors(s->alternatingRowColors());
+    disconnect(tv->singleClickTree);
+    disconnect(tv->singleClickList);
+    if (s->singleClick()) {
+        tv->singleClickTree = connect(tv->tree, &QTreeView::clicked, this, &Panel::onItemActivated);
+        tv->singleClickList = connect(tv->list, &QListView::clicked, this, &Panel::onItemActivated);
+    }
+}
+
+void Panel::updateEmptyLabel()
+{
+    const bool empty = !m_inSearchMode && m_model->rowCount() == 0
+                       && !m_model->hasListingError() && !m_model->needsReload();
+    if (empty) {
+        m_emptyDirLabel->setGeometry(m_tabStack->rect());
+        m_emptyDirLabel->raise();
+    }
+    m_emptyDirLabel->setVisible(empty);
+}
+
+// Showing a pooled tab whose rows are a complete listing of its folder: what
+// onDirectoryLoaded does for the UI, without a load. Its views kept their rows,
+// selection and scroll; a light re-list then brings in what changed while it
+// was frozen.
+void Panel::resumeTabView()
+{
+    stopLoadingIndicator();
+    if (m_model->showHidden() != m_showHidden)
+        m_model->setShowHidden(m_showHidden);
+    m_model->setFrozen(false);
+    m_model->relistLight();
+    m_model->revalidateDirectory();
+    if (m_folderSizeCalcEnabled)
+        m_model->requestAllFolderSizes();
+
+    if (m_errorWidget->isVisible())
+        m_errorWidget->animatedHide();
+    updateAddressBar();
+    if (m_currentTab >= 0 && m_currentTab < m_tabs.size())
+        updateTabTitle(m_currentTab);
+    applyColumnSettings();
+    stretchLastColumn();
+    Q_EMIT urlChanged(currentUrl());
+
+    if (m_pendingAction != PendingAction::SelectAndEdit
+        && (!m_embedded || isAncestorOf(QApplication::focusWidget())))
+        currentView()->setFocus();
+    applyPendingSelection();
+    applyPendingRestore();
+    updateStatusBar();
+    updateEmptyLabel();
+    scheduleThumbnailUpdate();
 }
 
 // ── Navigation ────────────────────────────────────────────────────────────────
@@ -752,7 +1007,8 @@ void Panel::closeTab(int index)
         return;
     }
 
-    m_recentTabIds.removeAll(m_tabs.at(index).id);
+    const quint64 closedId = m_tabs.at(index).id;
+    m_recentTabIds.removeAll(closedId);
     m_tabs.removeAt(index);
     m_tabBar->blockSignals(true);
     m_tabBar->removeTab(index);
@@ -761,6 +1017,7 @@ void Panel::closeTab(int index)
     if (index != m_currentTab) {
         // A background tab: the visible one stays put and is not reloaded.
         // Only its index shifts when a tab before it went away.
+        destroyViewForTab(closedId);
         if (index < m_currentTab)
             --m_currentTab;
         m_tabBar->blockSignals(true);
@@ -771,8 +1028,9 @@ void Panel::closeTab(int index)
     }
 
     const int newIndex = qBound(0, index > 0 ? index - 1 : 0, m_tabs.size() - 1);
-    m_currentTab = -1; // force reload
+    m_currentTab = -1; // nothing to save for the closed tab
     switchToTab(newIndex);
+    destroyViewForTab(closedId); // no longer current
     Q_EMIT tabCountChanged();
 }
 
@@ -788,7 +1046,13 @@ void Panel::closeOtherTabs(int keepIndex)
         m_tabs[m_currentTab].viewMode = static_cast<int>(m_viewMode);
 
     const TabContext kept = m_tabs.at(keepIndex);
+    QList<quint64> closedIds;
+    for (const TabContext &t : std::as_const(m_tabs)) {
+        if (t.id != kept.id)
+            closedIds.append(t.id);
+    }
     m_tabs = {kept};
+    m_recentTabIds.clear();
     m_tabBar->blockSignals(true);
     for (int i = m_tabBar->count() - 1; i >= 0; --i) {
         if (i != keepIndex)
@@ -800,9 +1064,11 @@ void Panel::closeOtherTabs(int keepIndex)
     if (keepIsCurrent) {
         m_currentTab = 0;
     } else {
-        m_currentTab = -1; // force load of the kept tab
+        m_currentTab = -1; // the closed current tab has nothing to save
         switchToTab(0);
     }
+    for (quint64 id : std::as_const(closedIds))
+        destroyViewForTab(id);
     Q_EMIT tabCountChanged();
 }
 
@@ -845,8 +1111,11 @@ void Panel::rememberViewState(quint64 id)
 {
     m_recentTabIds.removeAll(id);
     m_recentTabIds.prepend(id);
-    while (m_recentTabIds.size() > kMaxTabsWithViewState) {
+    // The current tab is loaded too, so the recently left ones get one place
+    // less: kMaxLoadedTabs in all.
+    while (m_recentTabIds.size() > kMaxLoadedTabs - 1) {
         const quint64 evicted = m_recentTabIds.takeLast();
+        destroyViewForTab(evicted);
         for (TabContext &t : m_tabs) {
             if (t.id == evicted) {
                 t.history.trimCurrentPosition(); // down to what any entry keeps
@@ -1123,8 +1392,10 @@ void Panel::relocateTabsUnder(const QUrl &root, const QUrl &fallback)
             m_tabs[i].filterSubdirs = false;
             m_tabs[i].filterCrossFs = false;
             m_tabs[i].searchTerm.clear();
-            m_tabs[i].searchTerm.clear();
             m_recentTabIds.removeAll(m_tabs.at(i).id);
+            // Its frozen views still list the old place; they would also keep
+            // the lister holding a path on the device going away.
+            destroyViewForTab(m_tabs.at(i).id);
             updateTabTitle(i);
         }
     }
@@ -1144,6 +1415,11 @@ void Panel::switchToTab(int index)
     if (m_currentTab == index)
         return;
 
+    // Out of the recently-left list before the tab being left goes in: that
+    // insertion may evict the oldest entry's views, and they must not be the
+    // ones about to be shown.
+    m_recentTabIds.removeAll(m_tabs.at(index).id);
+
     // Save the tab being left, then clear what belongs to it: the filter bar
     // and the search used to carry over into whichever tab came next.
     if (m_currentTab >= 0 && m_currentTab < m_tabs.size()) {
@@ -1159,6 +1435,19 @@ void Panel::switchToTab(int index)
     m_tabBar->blockSignals(false);
 
     const TabContext &tab = m_tabs.at(index);
+
+    // The tab's own views. The one being left is frozen, keeping its rows,
+    // selection and scroll for when it is shown again.
+    TabView *previous = m_cur;
+    TabView *tv = viewForTab(tab.id);
+    if (tv != previous) {
+        if (previous)
+            previous->model->setFrozen(true);
+        copyColumnLayout(previous, tv);
+        bindTabView(tv);
+    }
+    stopLoadingIndicator();
+
     setViewMode(static_cast<ViewMode>(tab.viewMode));
 
     // Armed before the load, so the listing's first completed() applies it.
@@ -1177,14 +1466,27 @@ void Panel::switchToTab(int index)
     restore.searchTerm    = tab.searchTerm;
     restore.position      = m_tabs[index].history.takeCurrentPosition();
     restore.search        = std::exchange(m_tabs[index].searchState, std::nullopt);
-    m_recentTabIds.removeAll(tab.id);
     if (restore.filterVisible || restore.position || restore.search)
         m_pendingRestore = std::move(restore);
     else
         m_pendingRestore.reset();
 
-    if (tab.history.current().isValid())
-        loadUrl(tab.history.current());
+    const QUrl url = tab.history.current();
+    if (url.isValid()) {
+        // Pooled and complete: show it as it was and re-list the differences.
+        // Anything else — new views, a listing left unfinished or failed, or a
+        // tab moved elsewhere while frozen (unmount) — loads afresh.
+        const bool reusable = m_model->directory() == url && !m_model->needsReload();
+        if (reusable) {
+            resumeTabView();
+        } else {
+            // From the source, not KIO's directory cache: a tab's frozen
+            // lister stopped watching, so the cache entry it left behind when
+            // its views were dropped can be stale, and serving from it showed
+            // the folder as it was before the tab was left.
+            loadUrl(url, /*takeFocus=*/true, /*reload=*/true);
+        }
+    }
 
     Q_EMIT navigationStateChanged();
     Q_EMIT previewItemChanged();
@@ -1206,6 +1508,9 @@ TabContext Panel::takeTab(int index)
 
     if (m_tabs.size() == 1) {
         // Remove the last tab directly and signal the container to close this panel.
+        // Its views stay as the panel's unassigned current one, frozen.
+        m_cur->tabId = 0;
+        m_model->setFrozen(true);
         m_tabs.removeAt(0);
         m_tabBar->blockSignals(true);
         m_tabBar->removeTab(0);
@@ -1221,6 +1526,16 @@ TabContext Panel::takeTab(int index)
 
 void Panel::clearAllTabs()
 {
+    // Every tab's views go, except the current ones, which become the panel's
+    // unassigned view for whichever tab is inserted next.
+    const QList<TabView *> views = m_views;
+    for (TabView *tv : views)
+        destroyTabView(tv);
+    m_cur->tabId = 0;
+    m_model->setFrozen(true);
+    m_recentTabIds.clear();
+    m_pendingRestore.reset();
+
     m_tabBar->blockSignals(true);
     m_tabs.clear();
     while (m_tabBar->count() > 0)
@@ -1277,11 +1592,15 @@ void Panel::setViewMode(ViewMode mode)
 
 Panel::ViewMode Panel::viewMode() const { return m_viewMode; }
 
-bool Panel::foldersFirst() const { return m_proxyModel->foldersFirst(); }
+bool Panel::foldersFirst() const { return m_foldersFirst; }
 void Panel::setFoldersFirst(bool first)
 {
-    m_model->setFoldersFirst(first);      // keeps streaming-insert order consistent
-    m_proxyModel->setFoldersFirst(first); // actually controls displayed sort order
+    // A panel-wide choice: every loaded tab follows, as new ones do.
+    m_foldersFirst = first;
+    for (TabView *tv : std::as_const(m_views)) {
+        tv->model->setFoldersFirst(first);  // keeps streaming-insert order consistent
+        tv->proxy->setFoldersFirst(first);  // actually controls displayed sort order
+    }
 }
 
 void Panel::setFolderSizeCalcEnabled(bool enabled)
@@ -1531,7 +1850,7 @@ void Panel::restoreSettings(KConfigGroup &group)
 {
     QHeaderView *header = m_treeView->header();
     // Sections are set directly below, behind applyColumnSettings()'s back.
-    m_appliedHiddenColumnsValid = false;
+    m_cur->appliedHiddenColumnsValid = false;
     // This window's own saved widths outrank the global seed, so claim the
     // one-shot slot before loading tabs — switchToTab() below resets the model,
     // which calls applyColumnSettings() and would otherwise seed over them.
@@ -1685,8 +2004,8 @@ void Panel::updateHighlightDelegate()
 
 bool Panel::eventFilter(QObject *watched, QEvent *event)
 {
-    if (watched == m_stack && event->type() == QEvent::Resize) {
-        m_emptyDirLabel->setGeometry(m_stack->rect());
+    if (watched == m_tabStack && event->type() == QEvent::Resize) {
+        m_emptyDirLabel->setGeometry(m_tabStack->rect());
         return false;
     }
     if (watched == m_tabBar) {
@@ -1938,6 +2257,17 @@ void Panel::onLockClicked(int section)
     lockHeader->setLockedSection(section);
 }
 
+void Panel::applySortPreference(const QUrl &url)
+{
+    const auto [col, order] = VelaSettings::dirSortPref(url.toString());
+    auto *lockHeader = static_cast<SortLockHeaderView *>(m_treeView->header());
+    lockHeader->setLockedSection(col);
+    m_lastSortCol = col;
+    m_applyingLockedSort = true;
+    m_treeView->sortByColumn(col, order);
+    m_applyingLockedSort = false;
+}
+
 void Panel::onDirectoryLoaded(const QUrl &)
 {
     // The listing is complete: the animation stops and the status line goes back
@@ -1945,23 +2275,12 @@ void Panel::onDirectoryLoaded(const QUrl &)
     // row is in.
     stopLoadingIndicator();
 
-    // Restore the locked sort preference for this directory before updating UI —
-    // once per navigation only. Create/paste/F5 re-list the same directory and
-    // also land here; re-applying then threw away a sort the user had chosen.
-    if (m_lockedSortAppliedFor != currentUrl()) {
-        m_lockedSortAppliedFor = currentUrl();
-        // First successful listing since navigating here. urlChanged fires
-        // before the listing even starts (and again on every re-list), so a
-        // mistyped address used to land in Recent.
+    // First successful listing since navigating here. urlChanged fires before
+    // the listing even starts (and again on every re-list), so a mistyped
+    // address used to land in Recent. Create/paste/F5 re-list and land here
+    // too, but are not visits.
+    if (std::exchange(m_visitPending, false))
         Q_EMIT directoryVisited(currentUrl());
-        const auto [col, order] = VelaSettings::dirSortPref(currentUrl().toString());
-        auto *lockHeader = static_cast<SortLockHeaderView *>(m_treeView->header());
-        lockHeader->setLockedSection(col);
-        m_lastSortCol = col;
-        m_applyingLockedSort = true;
-        m_treeView->sortByColumn(col, order);
-        m_applyingLockedSort = false;
-    }
 
     updateAddressBar();
     updateStatusBar();
@@ -1977,7 +2296,7 @@ void Panel::onDirectoryLoaded(const QUrl &)
     // when it's still mid-fade from animatedHide(), a fast empty-dir load would
     // otherwise suppress the label (e.g. missing dir → empty dir).
     const bool empty = (m_model->rowCount() == 0);
-    m_emptyDirLabel->setGeometry(m_stack->rect());
+    m_emptyDirLabel->setGeometry(m_tabStack->rect());
     m_emptyDirLabel->setVisible(empty);
     m_emptyDirLabel->raise();
 
@@ -2081,6 +2400,10 @@ void Panel::applyPendingSelection()
 
 void Panel::onSelectionChanged()
 {
+    // Every tab's views are connected; only the shown one's selection counts.
+    if (auto *sm = qobject_cast<QItemSelectionModel *>(sender());
+        sm && sm != currentView()->selectionModel())
+        return;
     m_selectionDirty = true;
     Q_EMIT previewItemChanged();
 
@@ -2157,7 +2480,7 @@ void Panel::onHeaderContextMenu(const QPoint &pos)
         connect(action, &QAction::triggered, this, [this, header, i](bool checked) {
             checked ? header->showSection(i) : header->hideSection(i);
             // This is the one place column visibility actually changes.
-            m_appliedHiddenColumnsValid = false;
+            m_cur->appliedHiddenColumnsValid = false;
             saveColumnVisibilityGlobally();
             Q_EMIT columnVisibilityChanged();
         });
@@ -2188,10 +2511,10 @@ void Panel::applyColumnSettings()
     }
     hiddenSet.remove(FileSystemModel::Name); // Name is never hideable
 
-    if (m_appliedHiddenColumnsValid && hiddenSet == m_appliedHiddenColumns)
+    if (m_cur->appliedHiddenColumnsValid && hiddenSet == m_cur->appliedHiddenColumns)
         return;
-    m_appliedHiddenColumns = hiddenSet;
-    m_appliedHiddenColumnsValid = true;
+    m_cur->appliedHiddenColumns = hiddenSet;
+    m_cur->appliedHiddenColumnsValid = true;
 
     QHeaderView *header = m_treeView->header();
     m_applyingColumnWidths = true; // hide/show resizes sections; not a user drag
@@ -2334,6 +2657,13 @@ void Panel::onFilterSubdirToggled(bool on)
 
 void Panel::startSubfolderSearch(const QString &term)
 {
+    // The engine walks the local filesystem. On sftp/smb/… it used to finish
+    // at once and report "0 results", which reads as "nothing matches".
+    if (!currentUrl().isLocalFile()) {
+        exitSearchMode();
+        m_filterBar->setHint(i18n("Searching subfolders works in local folders only"));
+        return;
+    }
     showCachedSearch(term, {});
     m_searchEngine->search(currentUrl(), term, m_filterBar->crossFilesystems());
 }
@@ -2376,13 +2706,17 @@ void Panel::onSearchResultsBatch(const KFileItemList &items)
 
 // ── Private helpers ───────────────────────────────────────────────────────────
 
-void Panel::loadUrl(const QUrl &url, bool takeFocus)
+void Panel::loadUrl(const QUrl &url, bool takeFocus, bool reload)
 {
     // Before setDirectory(): a cached listing can complete inside it.
     m_takeFocusOnLoad = takeFocus;
-    m_lockedSortAppliedFor.clear(); // a fresh load gets the locked/default sort again
+    // A navigation gets the folder's locked/default sort, applied when its
+    // listing starts (see loadingStarted) — create/paste/F5 and a reload after
+    // a failed trash re-list without it, so they keep a sort the user picked.
+    m_sortPendingFor = url;
+    m_visitPending = true;
     m_pendingFallback->stop();      // a create/paste wait belongs to the old directory
-    m_model->setDirectory(url);
+    m_model->setDirectory(url, reload);
     // INTENDED — do not flag the extra stat: it is one worker-thread stat per
     // navigation, and it catches what the listing cannot (see below).
     // Report a missing directory straight away rather than waiting for the
@@ -2563,6 +2897,8 @@ void Panel::updateVisibleThumbnails()
 
 QAbstractItemView *Panel::currentView() const
 {
+    if (!m_stack)
+        return nullptr; // only during construction, before the first view
     return m_stack->currentIndex() == 0
                ? static_cast<QAbstractItemView *>(m_treeView)
                : static_cast<QAbstractItemView *>(m_listView);
@@ -2606,12 +2942,29 @@ QModelIndexList Panel::selectedRowIndexes() const
     // Filtering selectedIndexes() by column is correct for both: the details
     // view contributes one index per column per row, the list view exactly one.
     // No de-duplication is needed because each (row, column) appears once.
+    //
+    // From the selection ranges, not selectedIndexes(): that built one index per
+    // row *per column* (nine per file) just for eight of them to be dropped —
+    // after a Ctrl+A over 100k files, 900k indexes for every copy, cut, trash
+    // or right-click. Only ranges covering the Name column count, which covers
+    // both the details view (whole rows) and the icon views (column 0).
     QModelIndexList rows;
-    const QModelIndexList all = sm->selectedIndexes();
-    rows.reserve(all.size());
-    for (const QModelIndex &idx : all) {
-        if (idx.column() == FileSystemModel::Name)
-            rows.append(idx);
+    const QItemSelection selection = sm->selection();
+    QSet<int> seen; // ranges may overlap after toggling; used only if there are several
+    const bool dedupe = selection.size() > 1;
+    for (const QItemSelectionRange &range : selection) {
+        if (!range.isValid() || range.left() > FileSystemModel::Name
+            || range.right() < FileSystemModel::Name)
+            continue;
+        const QAbstractItemModel *model = range.model();
+        for (int row = range.top(); row <= range.bottom(); ++row) {
+            if (dedupe) {
+                if (seen.contains(row))
+                    continue;
+                seen.insert(row);
+            }
+            rows.append(model->index(row, FileSystemModel::Name, range.parent()));
+        }
     }
     return rows;
 }
@@ -2810,9 +3163,42 @@ void Panel::renameSelected()
 
 void Panel::trashSelected()
 {
-    const QList<QUrl> urls = selectedUrls();
-    if (urls.isEmpty())
+    const KFileItemList items = selectedItems();
+    if (items.isEmpty())
         return;
+    QList<QUrl> urls;
+    urls.reserve(items.size());
+    for (const KFileItem &item : items)
+        urls.append(item.url());
+
+    // Already in the trash: Delete can only mean "for good".
+    if (currentUrl().scheme() == QLatin1String("trash")) {
+        deleteSelectedPermanently();
+        return;
+    }
+
+    // The trash only takes files with a local path behind them. On sftp, smb
+    // and the like KIO::trash fails, the optimistic removal is rolled back,
+    // and nothing happens. Say so and offer the one thing that can work.
+    const bool canTrash = std::all_of(items.cbegin(), items.cend(), [](const KFileItem &item) {
+        return item.mostLocalUrl().isLocalFile();
+    });
+    if (!canTrash) {
+        QMessageBox box(QMessageBox::Warning, i18n("No Trash Here"),
+                        i18np("“%2” cannot be moved to the Trash: this location has no trash.",
+                              "These %1 items cannot be moved to the Trash: this location has no trash.",
+                              urls.size(), urls.first().fileName()),
+                        QMessageBox::NoButton, this);
+        box.setInformativeText(i18n("They can be deleted permanently instead. This cannot be undone."));
+        QPushButton *del = box.addButton(i18n("Delete Permanently"), QMessageBox::DestructiveRole);
+        box.addButton(QMessageBox::Cancel);
+        box.setDefaultButton(QMessageBox::Cancel);
+        prepareMessageBox(box);
+        box.exec();
+        if (box.clickedButton() == del)
+            removeOptimistically(urls, FileOperationsManager::instance()->del(urls, window()));
+        return;
+    }
 
     if (VelaSettings::self()->confirmDelete()) {
         QMessageBox box(QMessageBox::Question, i18n("Move to Trash"),
@@ -3027,8 +3413,7 @@ QString Panel::newEntryNameProblem(const QString &name, QUrl &dest) const
         || name == QLatin1String("..")) {
         return i18n("\"%1\" is not a valid name.", name);
     }
-    dest = currentUrl().adjusted(QUrl::StripTrailingSlash);
-    dest.setPath(dest.path() + QLatin1Char('/') + name);
+    dest = FileOperationsManager::childUrl(currentUrl(), name);
 
     bool exists = m_model->rowForUrl(dest) >= 0;
     if (!exists && dest.isLocalFile()) {
@@ -3431,7 +3816,8 @@ void Panel::applyAppearanceSettings()
 {
     VelaSettings *s = VelaSettings::self();
 
-    m_treeView->setAlternatingRowColors(s->alternatingRowColors());
+    for (TabView *tv : std::as_const(m_views))
+        applyViewSettings(tv); // row colours, single-click opening
     setActive(m_active);
 
     if (m_thumbLoader) {
@@ -3446,19 +3832,10 @@ void Panel::applyAppearanceSettings()
     const int wantHidden = s->showHiddenDefault() ? 1 : 0;
     if (m_appliedShowHiddenDefault != wantHidden) {
         m_appliedShowHiddenDefault = wantHidden;
-        m_model->setShowHidden(wantHidden == 1);
+        setShowHidden(wantHidden == 1);
     }
-    m_model->invalidateDateColumns();
-
-    // single-click: connect clicked → onItemActivated; disconnect for double-click mode
-    disconnect(m_singleClickTreeConn);
-    disconnect(m_singleClickListConn);
-    if (s->singleClick()) {
-        m_singleClickTreeConn = connect(m_treeView, &QTreeView::clicked,
-                                        this, &Panel::onItemActivated);
-        m_singleClickListConn = connect(m_listView, &QListView::clicked,
-                                        this, &Panel::onItemActivated);
-    }
+    for (TabView *tv : std::as_const(m_views))
+        tv->model->invalidateDateColumns();
 }
 
 void Panel::focusAddressBar()
@@ -3468,7 +3845,20 @@ void Panel::focusAddressBar()
 
 void Panel::toggleHidden()
 {
-    m_model->setShowHidden(!m_model->showHidden());
+    setShowHidden(!showHidden());
+}
+
+bool Panel::showHidden() const
+{
+    return m_showHidden;
+}
+
+// One setting for the panel. Frozen tabs pick it up when shown again.
+void Panel::setShowHidden(bool show)
+{
+    m_showHidden = show;
+    if (m_model->showHidden() != show)
+        m_model->setShowHidden(show);
 }
 
 void Panel::createNewFolderAutoNamed()
@@ -3477,11 +3867,9 @@ void Panel::createNewFolderAutoNamed()
     // directory listing, so resolve the collision against that instead of
     // stat()ing the filesystem once per candidate.
     const QString base = i18n("New Folder");
-    const QUrl dirUrl = currentUrl().adjusted(QUrl::StripTrailingSlash);
+    const QUrl dirUrl = currentUrl();
     const auto candidateUrl = [&dirUrl](const QString &n) {
-        QUrl u = dirUrl;
-        u.setPath(u.path() + QLatin1Char('/') + n);
-        return u;
+        return FileOperationsManager::childUrl(dirUrl, n);
     };
 
     QString name = base;
@@ -3790,8 +4178,8 @@ void Panel::buildEmptyContextMenu(QMenu &menu, QWidget *pluginParent)
     {
         auto *hiddenAct = viewMenu->addAction(i18n("Show Hidden Files"));
         hiddenAct->setCheckable(true);
-        hiddenAct->setChecked(m_model->showHidden());
-        connect(hiddenAct, &QAction::toggled, m_model, &FileSystemModel::setShowHidden);
+        hiddenAct->setChecked(showHidden());
+        connect(hiddenAct, &QAction::toggled, this, &Panel::setShowHidden);
 
         viewMenu->addSeparator();
         auto addViewMode = [&](const QString &label, ViewMode vm) {

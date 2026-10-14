@@ -10,12 +10,13 @@ Vela is written in C++17 with Qt 6 and KDE Frameworks 6. It uses KIO for all fil
 
 ### Browsing
 
-- **Tabs and split panels.** Open tabs with Ctrl+T, close with Ctrl+W, cycle with Ctrl+Tab / Ctrl+Shift+Tab, jump with Ctrl+1 to Ctrl+9. Drag a tab to the edge of any panel to split the window there, drop it in the centre to merge it, or tear it out into its own window.
+- **Tabs and split panels.** Open tabs with Ctrl+T, close with Ctrl+W, cycle with Ctrl+Tab / Ctrl+Shift+Tab, jump with Ctrl+1 to Ctrl+9. Drag a tab to the edge of any panel to split the window there, drop it in the centre to merge it, or tear it out into its own window. The five most recently used tabs of a panel stay loaded, so switching back shows them instantly, exactly as they were; older tabs are re-read from disk when shown again.
+- **History that remembers where you were.** Back and forward restore the selection and scroll position of each folder, and going up selects the folder you came from. Each tab keeps its own filter and search.
 - **Four view modes.** Details, Medium Icons, Large Icons and Extra Large Icons. A slider in the status bar switches between them. Icon views show thumbnails, with a size limit you can set in Settings.
-- **Breadcrumb address bar.** Click a segment to jump there. Ctrl+L focuses the bar for typing a path.
+- **Breadcrumb address bar.** Click a segment to jump there. Ctrl+L focuses the bar for typing a path or URL; `~` and paths relative to the current folder work too.
 - **Per-folder sorting.** Each folder remembers its own sort column and order.
-- **Quick filter.** Start typing in a file view and the list filters live. Esc clears the filter.
-- **Recursive search.** Ctrl+F searches below the current folder by name, case-insensitively. A term containing `*` or `?` is treated as a glob, anything else as a subsequence match. Results stream in while the search runs. By default the search stays on the current filesystem, so searching `/` does not wander into `/proc` or network mounts.
+- **Quick filter.** Start typing in a file view and the list filters live. The arrow keys and Enter keep working on the list while you type. Esc clears the filter, and so does changing folder.
+- **Recursive search.** Ctrl+F searches below the current folder by name, case-insensitively. A term containing `*` or `?` is treated as a glob, anything else as a subsequence match. Results stream in while the search runs, nearest folders first, and stop at 10,000 matches. By default the search stays on the current filesystem, so searching `/` does not wander into `/proc` or network mounts.
 - **Hidden files.** Toggle with Ctrl+H or Ctrl+. (or set the default in Settings).
 
 ### Preview column
@@ -25,7 +26,7 @@ Press **Space** on a selection to open or close the preview column. It follows t
 - **Folders** show a capped, unwatched snapshot of their first entries (folders first, natural sort order). Click, focus or right-click into it and it becomes a full file view, with tabs, context menu and drag and drop. A folder selected inside that view opens another preview below it, to any depth.
 - **Images** are scaled to fit. Large photos are decoded at a bounded size, with EXIF orientation applied, so a 60-megapixel picture does not eat your memory.
 - **PDFs** scroll continuously, fit to width, and render only the pages on screen (Poppler).
-- **Text and source files** open in an **editor** with syntax highlighting (KSyntaxHighlighting). Save with Ctrl+S. Saving is atomic, line endings (LF or CRLF) are preserved, and a file that is not valid UTF-8 is opened read-only so a save cannot silently corrupt it.
+- **Text and source files** open in an **editor** with syntax highlighting (KSyntaxHighlighting). Save with Ctrl+S. Saving is atomic, line endings (LF or CRLF) are preserved, and a file that is not valid UTF-8 is opened read-only so a save cannot silently corrupt it. If the file changed on disk since it was opened, saving asks before overwriting it.
 - **Everything else** gets an icon and metadata card.
 
 ### Terminal panel
@@ -44,6 +45,7 @@ Ctrl+Shift+F4 focuses the terminal. The panel's open state, height and sync sett
 ### File operations
 
 - Copy, cut, paste, rename (F2), trash (Delete), permanent delete (Shift+Delete), new folder (F7 or Ctrl+N for an auto-named one), new file (Ctrl+Alt+N) and properties, all through KIO.
+- **Trash where there is none.** On locations without a trash (sftp, smb, ...) Delete says so and offers permanent deletion instead. Inside the Trash, Delete deletes permanently.
 - **Copy / Move to Other Panel.** With a split layout, send the selection straight to the other panel's folder. Move is bound to F6, Copy has no default key.
 - **Undo** (Edit menu) reverses the last copy, move, rename, trash, new folder or new file.
 - **Operations window** lists running transfers with progress. A toolbar indicator shows how many are running. An option keeps file operations out of Plasma's notification area.
@@ -135,7 +137,7 @@ To try Vela without installing it, run `bash run.sh` after a Debug configure. Th
 
 ## Known limitations
 
-- Search matches file names only, and only on local filesystems. Baloo is not used.
+- Search matches file names only, and only on local filesystems. Baloo is not used. It shows at most 10,000 results; refine the term for more specific ones.
 - Remote folders (sftp, smb, ...) can be browsed and previewed, but not searched.
 - The text editor reloads a file when it changes on disk, **including over unsaved edits**. A banner tells you when it happens.
 - The global "focus window" shortcut must be assigned by hand.

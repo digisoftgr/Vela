@@ -18,6 +18,9 @@ class FileOperationsManager : public QObject
 public:
     static FileOperationsManager *instance();
 
+    // `name` directly inside `dir`, whatever the trailing slash (and at "/").
+    static QUrl childUrl(const QUrl &dir, const QString &name);
+
     // Every operation below except del() is recorded with
     // KIO::FileUndoManager, so Edit ▸ Undo can reverse it. None of them
     // replaces an existing file without asking: conflicts go through KIO's

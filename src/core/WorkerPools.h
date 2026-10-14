@@ -33,8 +33,9 @@ QThreadPool *io();
 // previews, and previews cannot slow a search.
 QThreadPool *search();
 
-// Poppler work. One thread: a Poppler::Document must not render two pages at
-// once, and serialising across every preview pane costs nothing noticeable.
+// Poppler work. A Poppler::Document must not render two pages at once; each
+// PdfPreview holds a lock per document for that, so this pool only bounds how
+// many documents load or render concurrently.
 QThreadPool *pdf();
 
 // Queues `fn` onto the GUI thread. Safe to call from any worker at any time:

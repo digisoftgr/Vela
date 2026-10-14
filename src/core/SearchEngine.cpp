@@ -13,6 +13,7 @@
 #include <QMutexLocker>
 #include <QThread>
 #include <QThreadPool>
+#include <QTimer>
 #include <sys/stat.h>
 
 SearchEngine::SearchEngine(QObject *parent)
@@ -20,6 +21,72 @@ SearchEngine::SearchEngine(QObject *parent)
     , m_shared(std::make_shared<Shared>())
 {
     m_shared->owner = this;
+    m_flushTimer = new QTimer(this);
+    m_flushTimer->setSingleShot(true);
+    m_flushTimer->setInterval(kFlushIntervalMs);
+    connect(m_flushTimer, &QTimer::timeout, this, [this]() {
+        // Keep throttling while results keep coming; go idle once they stop.
+        if (m_pendingResults.isEmpty())
+            return;
+        flushResults();
+        m_flushTimer->start();
+    });
+}
+
+void SearchEngine::queueResults(const KFileItemList &items)
+{
+    m_pendingResults.append(items);
+    // Leading edge: the first results show at once, later ones at most once
+    // per interval.
+    if (!m_flushTimer->isActive()) {
+        flushResults();
+        m_flushTimer->start();
+    }
+}
+
+void SearchEngine::flushResults()
+{
+    if (m_pendingResults.isEmpty())
+        return;
+    const KFileItemList items = std::exchange(m_pendingResults, {});
+    Q_EMIT resultsBatch(items);
+}
+
+// Mount points strictly below `root`, from the kernel's own table. Paths there
+// escape space, tab, newline and backslash as \ooo octal.
+QSet<QString> SearchEngine::mountPointsBelow(const QString &root)
+{
+    QSet<QString> out;
+    QFile f(QStringLiteral("/proc/self/mountinfo"));
+    if (!f.open(QIODevice::ReadOnly))
+        return out;
+    const QString prefix = root.endsWith(QLatin1Char('/')) ? root : root + QLatin1Char('/');
+    const QList<QByteArray> lines = f.readAll().split('\n');
+    for (const QByteArray &line : lines) {
+        // id parent major:minor root mountpoint …
+        const QList<QByteArray> fields = line.split(' ');
+        if (fields.size() < 5)
+            continue;
+        const QByteArray &raw = fields.at(4);
+        QByteArray decoded;
+        decoded.reserve(raw.size());
+        for (int i = 0; i < raw.size(); ++i) {
+            if (raw.at(i) == '\\' && i + 3 < raw.size()) {
+                bool ok = false;
+                const int c = raw.mid(i + 1, 3).toInt(&ok, 8);
+                if (ok) {
+                    decoded.append(char(c));
+                    i += 3;
+                    continue;
+                }
+            }
+            decoded.append(raw.at(i));
+        }
+        const QString mountPoint = QFile::decodeName(decoded);
+        if (mountPoint.startsWith(prefix))
+            out.insert(mountPoint);
+    }
+    return out;
 }
 
 SearchEngine::~SearchEngine()
@@ -38,6 +105,8 @@ void SearchEngine::cancel()
     // initiated the stop, so it needs no notification; isRunning() is false now.
     ++m_shared->generation;
     m_running = false;
+    m_pendingResults.clear();
+    m_flushTimer->stop();
 }
 
 void SearchEngine::search(const QUrl &directory, const QString &term, bool crossFilesystems)
@@ -46,6 +115,8 @@ void SearchEngine::search(const QUrl &directory, const QString &term, bool cross
     // stale and exit, and whatever they already posted is dropped on delivery.
     const int gen = ++m_shared->generation;
     m_running = true;
+    m_pendingResults.clear();
+    m_flushTimer->stop();
 
     if (!directory.isLocalFile()) {
         m_running = false;
@@ -71,16 +142,24 @@ void SearchEngine::search(const QUrl &directory, const QString &term, bool cross
     const int maxDepth = kMaxDepth;
     const QString rootPath = directory.toLocalFile();
 
-    // One stat of the root, on the GUI thread: the directory is the one the
-    // panel just listed, so it is answered from the inode cache. A root that
-    // cannot be stat'ed disables the check rather than the search.
+    // Staying on the root's filesystem (`find -xdev`): the mount points below
+    // it are read once, so the walk itself needs no stat per directory. If
+    // the table cannot be read, fall back to comparing each directory's
+    // device with the root's.
     ctx->crossFilesystems = crossFilesystems;
     if (!crossFilesystems) {
-        struct stat rootSt;
-        if (::stat(QFile::encodeName(rootPath).constData(), &rootSt) == 0)
-            ctx->rootDevice = rootSt.st_dev;
-        else
-            ctx->crossFilesystems = true;
+        QFile mountInfo(QStringLiteral("/proc/self/mountinfo"));
+        if (mountInfo.exists()) {
+            ctx->mountPoints = mountPointsBelow(rootPath);
+        } else {
+            struct stat rootSt;
+            if (::stat(QFile::encodeName(rootPath).constData(), &rootSt) == 0) {
+                ctx->useDeviceCheck = true;
+                ctx->rootDevice = rootSt.st_dev;
+            } else {
+                ctx->crossFilesystems = true;
+            }
+        }
     }
 
     {
@@ -109,7 +188,9 @@ void SearchEngine::dispatchPending(const ContextPtr &ctx)
             if (ctx->activeTasks >= maxInFlight || ctx->pendingDirs.isEmpty())
                 return;
             // Entries are "depth:path" so the backlog stays a flat string list.
-            const QString entry = ctx->pendingDirs.takeLast();
+            // Oldest first: breadth-first, so shallow matches — usually the
+            // ones wanted — show before the walk disappears down one branch.
+            const QString entry = ctx->pendingDirs.takeFirst();
             const int sep = entry.indexOf(QLatin1Char(':'));
             depth = QStringView(entry).left(sep).toInt();
             path  = entry.mid(sep + 1);
@@ -131,24 +212,28 @@ void SearchEngine::postBatch(const ContextPtr &ctx, const KFileItemList &items)
     WorkerPools::postToGui([shared = ctx->shared, gen = ctx->gen, items]() {
         SearchEngine *engine = shared->owner.data();
         if (engine && gen == shared->generation.load(std::memory_order_relaxed))
-            Q_EMIT engine->resultsBatch(items);
+            engine->queueResults(items);
     });
 }
 
-void SearchEngine::postFinished(const ContextPtr &ctx)
+void SearchEngine::postFinished(const ContextPtr &ctx, bool limited)
 {
-    WorkerPools::postToGui([shared = ctx->shared, gen = ctx->gen]() {
+    WorkerPools::postToGui([shared = ctx->shared, gen = ctx->gen, limited]() {
         SearchEngine *engine = shared->owner.data();
         if (!engine || gen != shared->generation.load(std::memory_order_relaxed))
             return;
+        engine->m_flushTimer->stop();
+        engine->flushResults();
         engine->m_running = false;
+        if (limited)
+            Q_EMIT engine->limitReached();
         Q_EMIT engine->finished();
     });
 }
 
 void SearchEngine::runTask(const QString &path, int depth, ContextPtr ctx)
 {
-    const auto stale = [&ctx]() { return ctx->stale(); };
+    const auto stale = [&ctx]() { return ctx->stopped(); };
 
     if (stale() || depth <= 0) {
         taskDone(ctx);
@@ -184,12 +269,15 @@ void SearchEngine::runTask(const QString &path, int depth, ContextPtr ctx)
             const QString dirPath = fi.absoluteFilePath();
             bool descend = true;
             if (!ctx->crossFilesystems) {
-                // A mountpoint is a directory whose device differs from the
-                // root's. One stat per directory, not per file; the entry is
-                // still matched below, only not entered.
-                struct stat dst;
-                descend = ::stat(QFile::encodeName(dirPath).constData(), &dst) == 0
-                          && dst.st_dev == ctx->rootDevice;
+                // A mount point is matched below like any entry, only not
+                // entered.
+                if (ctx->useDeviceCheck) {
+                    struct stat dst;
+                    descend = ::stat(QFile::encodeName(dirPath).constData(), &dst) == 0
+                              && dst.st_dev == ctx->rootDevice;
+                } else {
+                    descend = !ctx->mountPoints.contains(dirPath);
+                }
             }
             if (descend)
                 discovered.append(QString::number(depth - 1) + QLatin1Char(':') + dirPath);
@@ -204,15 +292,25 @@ void SearchEngine::runTask(const QString &path, int depth, ContextPtr ctx)
         if (::stat(native.constData(), &st) != 0 && ::lstat(native.constData(), &st) != 0)
             continue; // vanished, or a dangling symlink we cannot even lstat
 
+        const int n = ctx->found.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (n > kMaxResults) {
+            ctx->limitHit.store(true, std::memory_order_relaxed);
+            break;
+        }
         localBatch.append(makeItem(filePath, name, st));
+        if (n == kMaxResults) {
+            ctx->limitHit.store(true, std::memory_order_relaxed);
+            break;
+        }
         if (localBatch.size() >= kBatchSize) {
             postBatch(ctx, localBatch);
             localBatch.clear();
         }
     }
 
-    // Flush any remaining results for this directory.
-    if (!localBatch.isEmpty() && !stale())
+    // Flush any remaining results for this directory — also when the limit
+    // stopped the walk: these are within it.
+    if (!localBatch.isEmpty() && !ctx->stale())
         postBatch(ctx, localBatch);
 
     if (!discovered.isEmpty() && !stale()) {
@@ -228,10 +326,12 @@ void SearchEngine::runTask(const QString &path, int depth, ContextPtr ctx)
 
 void SearchEngine::taskDone(const ContextPtr &ctx)
 {
+    int active = 0;
     {
         QMutexLocker lock(&ctx->queueMutex);
         if (ctx->activeTasks > 0)
             --ctx->activeTasks;
+        active = ctx->activeTasks;
     }
 
     // A stale search stops dispatching; its backlog is simply dropped with ctx.
@@ -240,13 +340,23 @@ void SearchEngine::taskDone(const ContextPtr &ctx)
     if (ctx->stale())
         return;
 
+    // Enough results: nothing new is dispatched. The last task to drain
+    // reports finished — after it, and every other task, posted its final
+    // batch, so finished() cannot overtake a batch on the GUI thread.
+    if (ctx->limitHit.load(std::memory_order_relaxed)) {
+        if (active == 0 && !ctx->finishPosted.exchange(true))
+            postFinished(ctx, /*limited=*/true);
+        return;
+    }
+
     // Pull more work in before deciding whether the search is over.
     dispatchPending(ctx);
 
     // The last task posts finished(); it is re-checked against the generation
     // on the GUI thread, so a search started meanwhile is not reported as done.
-    if (ctx->pendingTasks.fetch_sub(1, std::memory_order_acq_rel) == 1)
-        postFinished(ctx);
+    if (ctx->pendingTasks.fetch_sub(1, std::memory_order_acq_rel) == 1
+        && !ctx->finishPosted.exchange(true))
+        postFinished(ctx, /*limited=*/false);
 }
 
 bool SearchEngine::matchesName(const QString &name, const QString &term,

@@ -47,6 +47,24 @@ public:
     // just finished). Unlike immediateRefresh() it is a live update, not a
     // load: no focus or selection routine runs when it lands.
     void refreshSoon();
+    // A light re-list now: applies only the differences, keeps selection and
+    // scroll, and lands as directoryRefreshed (not a load).
+    void relistLight();
+
+    // Whether outside changes reach this model within ~30 ms (the inotify fast
+    // path). False for remote and network locations, which only see changes
+    // through KIO's own slower notification or an explicit re-list.
+    bool hasFastWatch() const { return !m_fastWatchedPath.isEmpty(); }
+
+    // A frozen model keeps its rows but stops watching: no directory watch, no
+    // auto-update, no folder-size jobs, and an unfinished listing is stopped.
+    // Used for tabs kept in memory while not shown. Thawing re-arms the watches;
+    // the caller then re-lists — fully when needsReload(), else relistLight().
+    void setFrozen(bool frozen);
+    bool isFrozen() const { return m_frozen; }
+    // The rows cannot be trusted as a complete listing: it never finished, or
+    // it failed. A thawed model in this state needs setDirectory() again.
+    bool needsReload() const { return m_initialLoading || m_listingError; }
 
     // Re-checks that the listed directory is still on disk, reporting it through
     // directoryError if not. The KDirWatch below covers deletions live; this is
@@ -161,6 +179,10 @@ private:
     bool m_emitFullOnNextCompleted = false; // next completed() is a navigation/explicit load
     bool m_listingError = false;            // the current listing failed (suppresses loaded/empty)
     bool m_initialLoading = false;          // between setDirectory and its first completed()
+    bool m_frozen = false;                  // see setFrozen()
+    // Folder sizes were asked for (requestAllFolderSizes) and not cleared since:
+    // folders that appear or change while listed get theirs computed as well.
+    bool m_autoFolderSizes = false;
 
     QHash<QUrl, KIO::filesize_t> m_folderSizes;
     QHash<QUrl, KJob *> m_runningSizeJobs;  // in flight, capped at kMaxConcurrentSizeJobs

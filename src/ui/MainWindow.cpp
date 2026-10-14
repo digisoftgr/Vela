@@ -322,8 +322,13 @@ void MainWindow::setupUI()
     // A finished command (mkdir, rm, …) shows at once, not after KIO's ~700 ms.
     // Every panel: the command may have touched the other panel's folder too.
     connect(m_terminal, &TerminalPanel::promptReturned, this, [this]() {
-        for (Panel *p : m_panelRoot->allPanels())
-            p->model()->refreshSoon();
+        // Only where nothing else would notice: a folder with the inotify fast
+        // path already shows the change within ~30 ms, and re-listing it on
+        // every prompt (even an empty Enter) was a second full read.
+        for (Panel *p : m_panelRoot->allPanels()) {
+            if (FileSystemModel *m = p->model(); m && !m->hasFastWatch())
+                m->refreshSoon();
+        }
     });
     connect(m_terminal, &TerminalPanel::shellExited, this, [this]() {
         m_actionToggleTerminal->setChecked(false); // `exit` closes the panel
@@ -1996,29 +2001,10 @@ void MainWindow::applySettings()
 
     // Theme: System=0, Light=1, Dark=2
     {
-        KColorSchemeManager *mgr = KColorSchemeManager::instance();
         const int mode = s->themeMode();
         const bool themeChanged = (s_appliedThemeMode >= 0) && (s_appliedThemeMode != mode);
         s_appliedThemeMode = mode;
-
-        if (mode == 0) {
-            mgr->activateSchemeId(QString()); // revert to system/KDE default
-        } else {
-            const QString keyword = (mode == 1) ? QStringLiteral("Light")
-                                                : QStringLiteral("Dark");
-            const auto *model = mgr->model();
-            QString found;
-            for (int r = 0; r < model->rowCount(); ++r) {
-                const QModelIndex idx = model->index(r, 0);
-                const QString name = idx.data(Qt::DisplayRole).toString();
-                if (name.contains(keyword, Qt::CaseInsensitive)) {
-                    found = idx.data(KColorSchemeModel::IdRole).toString();
-                    break;
-                }
-            }
-            if (!found.isEmpty())
-                mgr->activateSchemeId(found);
-        }
+        applyColorScheme(mode);
 
         if (themeChanged) {
             // Recreate all windows so they inherit the new palette cleanly.
@@ -2080,6 +2066,40 @@ void MainWindow::applySettings()
         m_wireframeOverlay->raise();
 
     applyWindowMask();
+}
+
+void MainWindow::applyColorScheme(int mode)
+{
+    KColorSchemeManager *mgr = KColorSchemeManager::instance();
+    if (mode == 0) {
+        mgr->activateSchemeId(QString()); // revert to system/KDE default
+        return;
+    }
+    // Breeze first, by id and then by name; only then the first scheme whose
+    // name merely contains the word. Taking the first match outright picked
+    // whatever third-party scheme happened to sort ahead ("Amarok Dark").
+    const bool light = (mode == 1);
+    const QString wantedId   = light ? QStringLiteral("BreezeLight") : QStringLiteral("BreezeDark");
+    const QString wantedName = light ? QStringLiteral("Breeze Light") : QStringLiteral("Breeze Dark");
+    const QString keyword    = light ? QStringLiteral("Light") : QStringLiteral("Dark");
+    const QAbstractItemModel *model = mgr->model();
+    QString byName, byKeyword;
+    for (int r = 0; r < model->rowCount(); ++r) {
+        const QModelIndex idx = model->index(r, 0);
+        const QString id   = idx.data(KColorSchemeModel::IdRole).toString();
+        const QString name = idx.data(Qt::DisplayRole).toString();
+        if (id == wantedId) {
+            mgr->activateSchemeId(id);
+            return;
+        }
+        if (byName.isEmpty() && name.compare(wantedName, Qt::CaseInsensitive) == 0)
+            byName = id;
+        if (byKeyword.isEmpty() && name.contains(keyword, Qt::CaseInsensitive))
+            byKeyword = id;
+    }
+    const QString chosen = !byName.isEmpty() ? byName : byKeyword;
+    if (!chosen.isEmpty())
+        mgr->activateSchemeId(chosen);
 }
 
 void MainWindow::applyWindowMask()
@@ -2436,7 +2456,7 @@ void MainWindow::populateCommandRegistry()
                           nullptr,
                           [this]() {
                               if (Panel *p = activePanel())
-                                  p->model()->setShowHidden(!p->model()->showHidden());
+                                  p->toggleHidden();
                           }});
 
     // Inform the palette so it rebuilds its item list.
@@ -2484,6 +2504,9 @@ void MainWindow::relocatePanelsOffMount(const QString &mountpoint)
     if (rootDir == fallback.adjusted(QUrl::StripTrailingSlash) || rootDir.isParentOf(fallback))
         fallback = QUrl::fromLocalFile(QFileInfo(mountpoint).absolutePath());
     for (Panel *p : m_panelRoot->allPanels())
+        p->relocateTabsUnder(root, fallback);
+    // The preview's live folder views too: they list and watch like any panel.
+    for (Panel *p : m_preview->livePanels())
         p->relocateTabsUnder(root, fallback);
     m_terminal->relocateOffMount(mountpoint, fallback.toLocalFile());
 }

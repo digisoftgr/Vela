@@ -15,6 +15,7 @@
 #include <QStandardItemModel>
 #include <QLabel>
 #include <QListView>
+#include <QMimeDatabase>
 #include <QMouseEvent>
 #include <QVBoxLayout>
 #include <QtConcurrent>
@@ -292,9 +293,15 @@ void FolderPreview::listLocal(const QString &path, bool showHidden)
         out.truncated = names.size() > keep;
         out.entries.reserve(keep);
         const QDir dir(path);
+        QMimeDatabase db;
         for (int i = 0; i < keep; ++i) {
+            // The type from the name, handed to the item: an empty one made
+            // iconName() read each file's leading bytes just to pick an icon.
+            const QString mime = names[i].isDir
+                ? QStringLiteral("inode/directory")
+                : db.mimeTypeForFile(names[i].name, QMimeDatabase::MatchExtension).name();
             const KFileItem item(QUrl::fromLocalFile(dir.filePath(names[i].name)),
-                                 QString(), KFileItem::Unknown);
+                                 mime, KFileItem::Unknown);
             out.entries.append(entryFor(item));
         }
         return out;
@@ -309,6 +316,7 @@ void FolderPreview::listRemote(const QUrl &url, bool showHidden)
     if (!m_lister) {
         m_lister = new KDirLister(this);
         m_lister->setAutoUpdate(false);
+        m_lister->setDelayedMimeTypes(true); // icons by name; no content reads
         // Every handler checks the generation the listing was started for.
         // clear() bumps it and then calls stop(), which can emit
         // listingDirCanceled synchronously — without the check, that presented
@@ -317,25 +325,28 @@ void FolderPreview::listRemote(const QUrl &url, bool showHidden)
                 [this](const QUrl &, const KFileItemList &items) {
             if (m_remoteGeneration != m_generation)
                 return;
-            for (const KFileItem &item : items) {
-                ++m_remoteTotal;
-                if (m_remoteEntries.size() < kMaxEntries) {
-                    m_remoteEntries.append(entryFor(item));
-                } else {
-                    m_remoteTruncated = true;
-                    m_lister->stop();
-                    break;
-                }
-            }
+            m_remoteItems.append(items);
         });
         auto finish = [this]() {
             if (m_remoteGeneration != m_generation)
                 return;
+            KFileItemList items = std::exchange(m_remoteItems, {});
+            QCollator collator;
+            collator.setNumericMode(true);
+            collator.setCaseSensitivity(Qt::CaseInsensitive);
+            std::sort(items.begin(), items.end(),
+                      [&collator](const KFileItem &a, const KFileItem &b) {
+                if (a.isDir() != b.isDir())
+                    return a.isDir();
+                return collator.compare(a.name(), b.name()) < 0;
+            });
             Listing l;
-            l.entries   = m_remoteEntries;
-            l.total     = m_remoteTotal;
-            l.truncated = m_remoteTruncated;
-            sortEntries(l.entries);
+            l.total     = items.size();
+            l.truncated = items.size() > kMaxEntries;
+            const int keep = qMin(int(items.size()), kMaxEntries);
+            l.entries.reserve(keep);
+            for (int i = 0; i < keep; ++i)
+                l.entries.append(entryFor(items.at(i)));
             present(l);
         };
         connect(m_lister, qOverload<const QUrl &>(&KDirLister::listingDirCompleted), this, finish);
@@ -349,9 +360,7 @@ void FolderPreview::listRemote(const QUrl &url, bool showHidden)
         });
     }
     m_remoteGeneration = m_generation;
-    m_remoteEntries.clear();
-    m_remoteTotal = 0;
-    m_remoteTruncated = false;
+    m_remoteItems.clear();
     m_lister->setShowHiddenFiles(showHidden);
     m_lister->openUrl(url, KDirLister::NoFlags);
 }
@@ -381,18 +390,6 @@ void FolderPreview::present(const Listing &listing)
                             "Showing the first %2 of %1 items",
                             listing.total, int(listing.entries.size())));
     m_footer->show();
-}
-
-void FolderPreview::sortEntries(QList<Entry> &entries)
-{
-    QCollator collator;
-    collator.setNumericMode(true);
-    collator.setCaseSensitivity(Qt::CaseInsensitive);
-    std::sort(entries.begin(), entries.end(), [&collator](const Entry &a, const Entry &b) {
-        if (a.isDir != b.isDir)
-            return a.isDir;
-        return collator.compare(a.name, b.name) < 0;
-    });
 }
 
 FolderPreview::Entry FolderPreview::entryFor(const KFileItem &item)

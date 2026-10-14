@@ -7,16 +7,24 @@
 #include <QObject>
 #include <QPointer>
 #include <QRegularExpression>
+#include <QSet>
 #include <QUrl>
 #include <atomic>
 #include <sys/stat.h>
 #include <memory>
+
+class QTimer;
 
 class SearchEngine : public QObject
 {
     Q_OBJECT
 
 public:
+
+    // A search stops after this many results. A short subsequence term over a
+    // large tree otherwise matched hundreds of thousands of files, all held in
+    // memory (and once more per recently left tab).
+    static constexpr int kMaxResults = 10000;
 
     explicit SearchEngine(QObject *parent = nullptr);
     ~SearchEngine() override;
@@ -34,7 +42,12 @@ public:
 
 Q_SIGNALS:
     // Both are emitted on the engine's (GUI) thread, and only for the current search.
+    // Coalesced on the GUI thread: at most one batch per kFlushIntervalMs, so
+    // a big tree does not cost one model insert (and one proxy re-sort) per
+    // directory that had a match.
     void resultsBatch(const KFileItemList &items);
+    // The search stopped at kMaxResults; emitted just before finished().
+    void limitReached();
     void finished();
 
 private:
@@ -58,8 +71,17 @@ private:
         QRegularExpression globRe;
         int                gen = 0;
         bool               crossFilesystems = false;
-        dev_t              rootDevice = 0; // compared when !crossFilesystems
+        // Mount points strictly below the root, read once from
+        // /proc/self/mountinfo, so leaving the root's filesystem costs no
+        // stat per directory. Used when !crossFilesystems.
+        QSet<QString>      mountPoints;
+        // Fallback when mountinfo cannot be read: compare st_dev per directory.
+        bool               useDeviceCheck = false;
+        dev_t              rootDevice = 0;
         std::atomic<int>   pendingTasks{1};
+        std::atomic<int>   found{0};          // results accepted so far
+        std::atomic<bool>  limitHit{false};   // found reached kMaxResults
+        std::atomic<bool>  finishPosted{false};
         // Directories discovered but not yet dispatched. Bounded dispatch means
         // the pool queue can't grow to one entry per directory in the tree.
         QMutex             queueMutex;
@@ -69,6 +91,11 @@ private:
         bool stale() const
         {
             return shared->generation.load(std::memory_order_relaxed) != gen;
+        }
+        // Stop walking: retired, or enough results.
+        bool stopped() const
+        {
+            return stale() || limitHit.load(std::memory_order_relaxed);
         }
     };
     using ContextPtr = std::shared_ptr<SearchContext>;
@@ -81,8 +108,16 @@ private:
                               const struct stat &st);
     static void taskDone(const ContextPtr &ctx);
     static void postBatch(const ContextPtr &ctx, const KFileItemList &items);
-    static void postFinished(const ContextPtr &ctx);
+    static void postFinished(const ContextPtr &ctx, bool limited);
+    static QSet<QString> mountPointsBelow(const QString &root);
+
+    // GUI-thread side of the coalescing.
+    void queueResults(const KFileItemList &items);
+    void flushResults();
 
     SharedPtr m_shared;
     bool      m_running = false; // GUI thread only
+    KFileItemList m_pendingResults;
+    QTimer   *m_flushTimer = nullptr;
+    static constexpr int kFlushIntervalMs = 100;
 };

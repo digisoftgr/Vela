@@ -1,6 +1,9 @@
 #include "BreadcrumbBar.h"
 
 #include <KLocalizedString>
+#include <KShell>
+
+#include <QDir>
 
 #include <QAction>
 #include <QApplication>
@@ -78,8 +81,14 @@ BreadcrumbBar::BreadcrumbBar(QWidget *parent)
         const QString text = m_lineEdit->text().trimmed();
         if (text.isEmpty())
             return;
-        const QUrl target = text.startsWith(QLatin1Char('/')) ? QUrl::fromLocalFile(text)
-                                                              : QUrl(text);
+        // "~", "~/foo" and names relative to the folder shown ("Documents",
+        // "../x") resolve the way a shell would; taken as a bare QUrl they were
+        // relative URLs with no scheme, and the navigation failed.
+        const QString expanded = KShell::tildeExpand(text);
+        const QString base = m_url.isLocalFile() ? m_url.toLocalFile() : QString();
+        QUrl target = QUrl::fromUserInput(expanded, base, QUrl::UserInputResolutionOption::AssumeLocalFile);
+        if (target.isLocalFile())
+            target = QUrl::fromLocalFile(QDir::cleanPath(target.toLocalFile()));
         // Leave edit mode first: the navigation that follows calls setUrl(),
         // and that must land on a bar already showing crumbs.
         leaveEditMode();

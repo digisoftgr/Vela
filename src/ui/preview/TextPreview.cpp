@@ -1,6 +1,7 @@
 #include "TextPreview.h"
 
 #include "core/WorkerPools.h"
+#include "ui/MessageBoxUtil.h"
 
 #include <KDirWatch>
 #include <KFormat>
@@ -15,6 +16,8 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QFontDatabase>
+#include <QMessageBox>
+#include <QPushButton>
 #include <QPlainTextEdit>
 #include <QSaveFile>
 #include <QScrollBar>
@@ -150,7 +153,17 @@ TextPreview::ReadResult TextPreview::readFile(const QString &path)
         r.error = file.errorString();
         return r;
     }
-    const QByteArray bytes = file.readAll();
+    // The size limit is checked here too, not only against the listing's size
+    // when the file was first shown: a file that grows while open would
+    // otherwise be read whole on the next reload.
+    const QFileInfo fi(file);
+    r.mtime = fi.lastModified();
+    r.diskSize = fi.size();
+    const QByteArray bytes = file.read(kMaxBytes + 1);
+    if (bytes.size() > kMaxBytes) {
+        r.error = i18n("Too large to open as text (limit %1).", KFormat().formatByteSize(kMaxBytes));
+        return r;
+    }
     r.ok = true;
     r.size = bytes.size();
 
@@ -208,6 +221,10 @@ void TextPreview::applyRead(const ReadResult &r, bool keepPosition)
         return;
     }
     m_bom = r.bom;
+    // The disk state this text corresponds to: saving checks it, and the
+    // watch ignores a notification that leaves it unchanged.
+    m_lastWriteMtime = r.mtime;
+    m_lastWriteSize  = r.diskSize;
     m_decodeFailed = r.decodeFailed;
     m_mixedEol = r.mixedEol;
     m_crlf = r.crlf;
@@ -278,6 +295,29 @@ bool TextPreview::save()
         text.replace(QLatin1String("\n"), QLatin1String("\r\n"));
 
     const QString path = m_url.toLocalFile();
+
+    // Changed on disk since it was read (the reload is still debounced, or the
+    // watch missed it): saving would silently discard that change. This is
+    // the user's own action, so asking is fine here.
+    {
+        const QFileInfo now(path);
+        if (now.exists() && m_lastWriteSize >= 0
+            && (now.lastModified() != m_lastWriteMtime || now.size() != m_lastWriteSize)) {
+            QMessageBox box(QMessageBox::Warning, i18n("File Changed on Disk"),
+                            i18n("\"%1\" was changed on disk after it was opened here.",
+                                 now.fileName()),
+                            QMessageBox::NoButton, window());
+            box.setInformativeText(i18n("Saving replaces the version on disk with yours."));
+            QPushButton *overwrite = box.addButton(i18n("Overwrite"), QMessageBox::DestructiveRole);
+            box.addButton(QMessageBox::Cancel);
+            box.setDefaultButton(QMessageBox::Cancel);
+            prepareMessageBox(box);
+            box.exec();
+            if (box.clickedButton() != overwrite)
+                return false;
+        }
+    }
+
     QSaveFile file(path);
     if (!file.open(QIODevice::WriteOnly)) {
         notify(i18n("Could not save: %1", file.errorString()), true);

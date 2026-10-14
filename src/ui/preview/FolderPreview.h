@@ -83,7 +83,6 @@ private:
     void listLocal(const QString &path, bool showHidden);
     void listRemote(const QUrl &url, bool showHidden);
     void present(const Listing &listing);
-    static void sortEntries(QList<Entry> &entries);
     static Entry entryFor(const KFileItem &item);
 
     class Model;
@@ -106,7 +105,8 @@ private:
     QFutureWatcher<Listing> *m_watcher = nullptr;
     KDirLister *m_lister = nullptr;
     int m_remoteGeneration = -1; // generation the current remote listing belongs to
-    QList<Entry> m_remoteEntries;
-    int  m_remoteTotal = 0;
-    bool m_remoteTruncated = false;
+    // Everything listed so far: the cap is applied after sorting, as for a
+    // local folder. Capping on arrival kept the first 100 in *server* order,
+    // so a remote preview showed an arbitrary subset.
+    KFileItemList m_remoteItems;
 };
