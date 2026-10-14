@@ -137,6 +137,8 @@ cmake --build build -j"$(nproc)"
 sudo cmake --install build
 ```
 
+If the update fails, a new version may need a package you do not have yet. Run the dependency installation step for your distribution from [instructions_to_install.md](instructions_to_install.md) again, re-run the `cmake -B build ...` configure command, then the update commands above.
+
 ## Optional packages
 
 - `ark`: compress and extract entries in the context menu.

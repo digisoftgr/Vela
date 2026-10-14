@@ -100,7 +100,11 @@ cmake --build build -j"$(nproc)"
 sudo cmake --install build
 ```
 
-If the build fails after an update, re-run the `cmake -B build ...` configure command from above first.
+If the update fails, a new version may need a package you do not have yet:
+
+1. Run the dependency installation step for your distribution again: [Arch Linux](#arch-linux), [Kubuntu](#kubuntu), or the list under [Other distributions](#other-distributions). Packages you already have are skipped.
+2. Re-run the `cmake -B build ...` configure command from [Build and install](#build-and-install).
+3. Run the update commands above again.
 
 ## Uninstalling
 

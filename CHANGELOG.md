@@ -3,6 +3,13 @@
 All notable changes to Vela are listed here, newest first.
 Versions follow [Semantic Versioning](https://semver.org/): `MAJOR.MINOR.PATCH`.
 
+## [0.7.6] - 2026-10-14
+
+### Changed
+
+- Building Vela needs KF6 Parts, required since 0.7.3 for the terminal panel (Arch: `kparts`, Kubuntu: `libkf6parts-dev`). If updating from an older version fails, install it, or run the dependency installation step from the install guide again.
+- The update instructions say what to do when an update fails: install any new dependencies, reconfigure, and build again.
+
 ## [0.7.5] - 2026-10-14
 
 ### Changed
