@@ -2,7 +2,7 @@
 # Contributor: Kapetas Dimitris <kapetasdim98@gmail.com>
 pkgname=vela
 _name=Vela
-pkgver=0.7.3
+pkgver=0.7.4
 pkgrel=1
 pkgdesc="Tabbed KDE Plasma file manager with built-in file and folder previews"
 arch=('x86_64')
@@ -39,7 +39,7 @@ optdepends=(
     'kio-extras: thumbnails and network protocols such as sftp and smb'
 )
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('c741914eb37531ab3799b366aac1dd33b1b65e0b7d56c19564099177a8130e99')
+sha256sums=('63aae2984ff28eb3aa4b9587c9973696a102ee37717dae230af6ebf8b69463d5')
 
 build() {
     cmake -B build -S "$_name-$pkgver" \
