@@ -462,6 +462,13 @@ Panel::Panel(QWidget *parent)
     connect(m_filterBar, &FilterBar::filterChanged, this, &Panel::onFilterChanged);
     connect(m_filterBar, &FilterBar::dismissed, this, &Panel::onFilterDismissed);
     connect(m_filterBar, &FilterBar::subdirSearchToggled, this, &Panel::onFilterSubdirToggled);
+    connect(m_filterBar, &FilterBar::keyForView, this, [this](QKeyEvent *ke) {
+        // Handled exactly as if the view had focus (Shift extends, Enter goes
+        // through the view's own Enter handling), but focus stays in the field.
+        QKeyEvent copy(ke->type(), ke->key(), ke->modifiers(), ke->text(),
+                       ke->isAutoRepeat(), ke->count());
+        QApplication::sendEvent(currentView(), &copy);
+    });
     connect(m_filterBar, &FilterBar::crossFilesystemsToggled, this, [this]() {
         // Re-run the current subfolder search with the new scope.
         if (m_filterBar->subdirSearch() && !m_filterBar->lineEdit()->text().isEmpty())
@@ -539,8 +546,8 @@ Panel::Panel(QWidget *parent)
     // A tab's search re-run on switching back: its selection and scroll apply
     // once the results are all in.
     connect(m_searchEngine, &SearchEngine::finished, this, [this]() {
-        if (m_pendingSearchViewState && m_inSearchMode)
-            applyViewState(*std::exchange(m_pendingSearchViewState, std::nullopt));
+        if (m_pendingSearchPosition && m_inSearchMode)
+            applyViewPosition(std::exchange(m_pendingSearchPosition, std::nullopt));
     });
 
     setupFileOpShortcuts();
@@ -593,10 +600,12 @@ void Panel::navigate(const QUrl &url, bool takeFocus)
 {
     if (m_currentTab < 0)
         return;
-    // Exit search mode on user-initiated navigation (not from search result activation)
-    if (m_inSearchMode && m_pendingAction == PendingAction::None)
-        exitSearchMode();
+    const QUrl from = currentUrl();
+    rememberPositionBeforeLeaving();
+    clearFilterOnNavigation();
     currentTab().history.push(url);
+    // Before loadUrl(): a cached listing can complete inside it.
+    armPositionRestore(from);
     loadUrl(url, takeFocus);
 }
 
@@ -624,9 +633,11 @@ void Panel::goBack()
 {
     if (m_currentTab < 0 || !currentTab().history.canGoBack())
         return;
-    if (m_inSearchMode)
-        exitSearchMode();
+    const QUrl from = currentUrl();
+    rememberPositionBeforeLeaving();
+    clearFilterOnNavigation();
     const QUrl url = currentTab().history.back();
+    armPositionRestore(from);
     loadUrl(url);
     Q_EMIT navigationStateChanged();
 }
@@ -635,9 +646,11 @@ void Panel::goForward()
 {
     if (m_currentTab < 0 || !currentTab().history.canGoForward())
         return;
-    if (m_inSearchMode)
-        exitSearchMode();
+    const QUrl from = currentUrl();
+    rememberPositionBeforeLeaving();
+    clearFilterOnNavigation();
     const QUrl url = currentTab().history.forward();
+    armPositionRestore(from);
     loadUrl(url);
     Q_EMIT navigationStateChanged();
 }
@@ -662,8 +675,7 @@ void Panel::goRefresh()
 {
     if (m_currentTab < 0 || !currentUrl().isValid())
         return;
-    if (m_inSearchMode)
-        exitSearchMode();
+    clearFilterOnNavigation();
     // A failed or vanished directory has nothing listed to update; open it
     // afresh exactly like a navigation would.
     if (m_model->hasListingError()) {
@@ -810,18 +822,22 @@ void Panel::saveTabState(int index)
         tab.searchTerm = tab.filterText; // typed, but the search had not started yet
     }
 
-    TabViewState st;
-    st.selection = selectedUrls();
-    st.current   = currentView()->currentIndex().data(FileSystemModel::UrlRole).toUrl();
-    st.scrollX   = currentView()->horizontalScrollBar()->value();
-    st.scrollY   = currentView()->verticalScrollBar()->value();
-    // Only finished results are worth keeping; a partial list would look
-    // complete. An unfinished search is re-run on the way back.
-    if (m_inSearchMode && !m_searchEngine->isRunning()) {
-        st.searchCached  = true;
-        st.searchResults = m_searchResultsModel->items();
+    tab.searchState.reset();
+    if (m_inSearchMode) {
+        // What is on screen belongs to the results, not to the directory.
+        tab.history.setCurrentPosition(std::nullopt);
+        TabSearchState st;
+        st.position = captureViewPosition(/*fullSelection=*/true);
+        // Only finished results are worth keeping; a partial list would look
+        // complete. An unfinished search is re-run on the way back.
+        if (!m_searchEngine->isRunning()) {
+            st.cached  = true;
+            st.results = m_searchResultsModel->items();
+        }
+        tab.searchState = std::move(st);
+    } else {
+        tab.history.setCurrentPosition(captureViewPosition(/*fullSelection=*/true));
     }
-    tab.viewState = std::move(st);
     rememberViewState(tab.id);
 }
 
@@ -833,7 +849,8 @@ void Panel::rememberViewState(quint64 id)
         const quint64 evicted = m_recentTabIds.takeLast();
         for (TabContext &t : m_tabs) {
             if (t.id == evicted) {
-                t.viewState.reset(); // filter text and search term stay
+                t.history.trimCurrentPosition(); // down to what any entry keeps
+                t.searchState.reset();           // filter text and search term stay
                 break;
             }
         }
@@ -859,12 +876,24 @@ void Panel::resetFilterQuietly()
     m_delegate->clearHighlight();
 }
 
-void Panel::applyPendingTabRestore()
+// Every navigation — including F5 and re-entering the same folder — starts
+// unfiltered: a pattern typed for one folder silently hid entries in the next,
+// and a subdir search term stayed in the bar with nothing searched for it.
+// Tab switches are not navigations and keep their tab's filter.
+void Panel::clearFilterOnNavigation()
 {
-    if (!m_pendingTabRestore)
+    const bool hadFocus = m_filterBar->isAncestorOf(QApplication::focusWidget());
+    resetFilterQuietly();
+    if (hadFocus)
+        currentView()->setFocus();
+}
+
+void Panel::applyPendingRestore()
+{
+    if (!m_pendingRestore)
         return;
-    PendingTabRestore r = std::move(*m_pendingTabRestore);
-    m_pendingTabRestore.reset();
+    PendingRestore r = std::move(*m_pendingRestore);
+    m_pendingRestore.reset();
     if (currentUrl() != r.url)
         return; // navigated elsewhere before this load completed
 
@@ -877,13 +906,14 @@ void Panel::applyPendingTabRestore()
     }
 
     if (!r.searchTerm.isEmpty()) {
-        if (r.state && r.state->searchCached) {
-            showCachedSearch(r.searchTerm, r.state->searchResults);
-            applyViewState(*r.state);
+        if (r.search && r.search->cached) {
+            showCachedSearch(r.searchTerm, r.search->results);
+            applyViewPosition(r.search->position);
         } else {
             // Not among the recently left tabs, or left mid-search: run it again.
             startSubfolderSearch(r.searchTerm);
-            m_pendingSearchViewState = std::move(r.state);
+            if (r.search)
+                m_pendingSearchPosition = std::move(r.search->position);
         }
         return;
     }
@@ -892,12 +922,93 @@ void Panel::applyPendingTabRestore()
         m_proxyModel->setFilterPattern(r.filterText);
         m_delegate->setHighlightText(r.filterText);
     }
-    if (r.state)
-        applyViewState(*r.state);
+    applyViewPosition(r.position, r.selectChild);
     updateStatusBar();
 }
 
-void Panel::applyViewState(const TabViewState &state)
+// The entry directly inside `ancestor` on the way down to `descendant`
+// (/a, /a/b/c → /a/b), or nothing if `ancestor` is not above `descendant`.
+static QUrl childTowards(const QUrl &ancestor, const QUrl &descendant)
+{
+    const QUrl base = ancestor.adjusted(QUrl::StripTrailingSlash);
+    const QUrl leaf = descendant.adjusted(QUrl::StripTrailingSlash);
+    if (!base.isValid() || !base.isParentOf(leaf))
+        return {};
+    QString prefix = base.path();
+    if (!prefix.endsWith(QLatin1Char('/')))
+        prefix += QLatin1Char('/');
+    const QString name = leaf.path().mid(prefix.size()).section(QLatin1Char('/'), 0, 0);
+    if (name.isEmpty())
+        return {};
+    QUrl child = base;
+    child.setPath(prefix + name);
+    return child;
+}
+
+ViewPosition Panel::captureViewPosition(bool fullSelection) const
+{
+    QAbstractItemView *view = currentView();
+    ViewPosition pos;
+    pos.current  = view->currentIndex().siblingAtColumn(0).data(FileSystemModel::UrlRole).toUrl();
+    pos.scrollX  = view->horizontalScrollBar()->value();
+    pos.scrollY  = view->verticalScrollBar()->value();
+    pos.viewMode = static_cast<int>(m_viewMode);
+
+    // Topmost from the selection ranges, not the selected indexes: a Ctrl+A is
+    // one range however many rows it covers.
+    QModelIndex top;
+    if (QItemSelectionModel *sm = view->selectionModel()) {
+        for (const QItemSelectionRange &range : sm->selection()) {
+            if (!top.isValid() || range.top() < top.row())
+                top = range.model()->index(range.top(), 0, range.parent());
+        }
+    }
+    if (!top.isValid())
+        return pos;
+    const QUrl topUrl = top.data(FileSystemModel::UrlRole).toUrl();
+    if (fullSelection) {
+        pos.selection = selectedUrls();
+        // Topmost first: it is what survives a trim.
+        const qsizetype i = pos.selection.indexOf(topUrl);
+        if (i > 0)
+            pos.selection.move(i, 0);
+    } else if (topUrl.isValid()) {
+        pos.selection = {topUrl};
+    }
+    return pos;
+}
+
+void Panel::rememberPositionBeforeLeaving()
+{
+    if (m_currentTab < 0)
+        return;
+    // Search results are not the directory: nothing of them belongs on its entry.
+    currentTab().history.setCurrentPosition(
+        m_inSearchMode ? std::nullopt
+                       : std::optional<ViewPosition>(captureViewPosition(/*fullSelection=*/false)));
+}
+
+void Panel::armPositionRestore(const QUrl &from)
+{
+    NavigationHistory &history = currentTab().history;
+    // An explicit reveal (Open Containing Folder, a search result) says what to
+    // select; the entry's own position must not override it.
+    if (m_pendingAction != PendingAction::None) {
+        history.takeCurrentPosition();
+        m_pendingRestore.reset();
+        return;
+    }
+    PendingRestore restore;
+    restore.url         = currentUrl();
+    restore.position    = history.takeCurrentPosition();
+    restore.selectChild = childTowards(restore.url, from);
+    if (restore.position || restore.selectChild.isValid())
+        m_pendingRestore = std::move(restore);
+    else
+        m_pendingRestore.reset();
+}
+
+void Panel::applyViewPosition(const std::optional<ViewPosition> &position, const QUrl &selectChild)
 {
     QAbstractItemView *view = currentView();
     QItemSelectionModel *sm = view->selectionModel();
@@ -916,27 +1027,60 @@ void Panel::applyViewState(const TabViewState &state)
         return row < 0 ? QModelIndex() : m_proxyModel->mapFromSource(m_model->index(row, 0));
     };
 
+    QList<QUrl> targets;
+    QUrl currentTarget;
+    if (selectChild.isValid()) {
+        // Going up: the folder we came from wins over whatever was selected
+        // here before. Hidden or filtered out, nothing is restored at all.
+        if (!proxyIndexFor(selectChild).isValid())
+            return;
+        targets    = {selectChild};
+        currentTarget = selectChild;
+    } else if (position) {
+        targets    = position->selection;
+        currentTarget = position->current;
+    } else {
+        return;
+    }
+
     QItemSelection selection;
-    for (const QUrl &url : state.selection) {
+    QModelIndex anchor; // topmost selected; targets are stored topmost first
+    for (const QUrl &url : std::as_const(targets)) {
         const QModelIndex idx = proxyIndexFor(url);
-        if (idx.isValid())
-            selection.select(idx, idx);
+        if (!idx.isValid())
+            continue;
+        selection.select(idx, idx);
+        if (!anchor.isValid())
+            anchor = idx;
     }
     sm->select(selection, QItemSelectionModel::ClearAndSelect | QItemSelectionModel::Rows);
-    const QModelIndex current = proxyIndexFor(state.current);
+    QModelIndex current = proxyIndexFor(currentTarget);
+    if (!current.isValid())
+        current = anchor;
     if (current.isValid())
         sm->setCurrentIndex(current, QItemSelectionModel::NoUpdate);
 
+    // Stands down any scroll retry from an earlier restore.
+    const int generation = ++m_restoreGeneration;
+    const QPersistentModelIndex keepVisible(anchor);
+
+    if (!position || position->viewMode != static_cast<int>(m_viewMode)) {
+        // Pixel offsets from another view mode mean nothing here.
+        if (anchor.isValid())
+            view->scrollTo(anchor);
+        return;
+    }
+
     // The scroll range fills in as the view lays rows out — in the icon modes
     // over several event-loop passes — so retry until it can hold the old
-    // position, for up to a second.
-    const int generation = ++m_restoreGeneration;
-    const int scrollX = state.scrollX, scrollY = state.scrollY;
+    // position, for up to a second. Then, if the selected item is not on
+    // screen at that position, bring it in.
+    const int scrollX = position->scrollX, scrollY = position->scrollY;
     // The retry refers to itself weakly; each queued call holds the strong
     // reference, so the closure is freed with the last pending timer.
     auto apply = std::make_shared<std::function<void(int)>>();
     std::weak_ptr<std::function<void(int)>> weak = apply;
-    *apply = [this, view, scrollX, scrollY, generation, weak](int attempt) {
+    *apply = [this, view, scrollX, scrollY, generation, keepVisible, weak](int attempt) {
         if (generation != m_restoreGeneration || view != currentView())
             return;
         QScrollBar *v = view->verticalScrollBar();
@@ -948,6 +1092,9 @@ void Panel::applyViewState(const TabViewState &state)
         }
         v->setValue(scrollY);
         h->setValue(scrollX);
+        if (keepVisible.isValid()
+            && !view->viewport()->rect().contains(view->visualRect(keepVisible)))
+            view->scrollTo(keepVisible);
     };
     QTimer::singleShot(0, this, [apply]() { (*apply)(0); });
 }
@@ -969,8 +1116,13 @@ void Panel::relocateTabsUnder(const QUrl &root, const QUrl &fallback)
             navigateTo(fallback);
         } else {
             m_tabs[i].history.push(fallback);
-            // Selection, scroll and search results were for the old place.
-            m_tabs[i].viewState.reset();
+            // Filter and search results were for the old place.
+            m_tabs[i].searchState.reset();
+            m_tabs[i].filterVisible = false;
+            m_tabs[i].filterText.clear();
+            m_tabs[i].filterSubdirs = false;
+            m_tabs[i].filterCrossFs = false;
+            m_tabs[i].searchTerm.clear();
             m_tabs[i].searchTerm.clear();
             m_recentTabIds.removeAll(m_tabs.at(i).id);
             updateTabTitle(i);
@@ -1016,19 +1168,20 @@ void Panel::switchToTab(int index)
     }
 
     // The saved state is consumed here; it is re-saved when the tab is left.
-    PendingTabRestore restore;
+    PendingRestore restore;
     restore.url           = tab.history.current();
     restore.filterVisible = tab.filterVisible;
     restore.filterText    = tab.filterText;
     restore.filterSubdirs = tab.filterSubdirs;
     restore.filterCrossFs = tab.filterCrossFs;
     restore.searchTerm    = tab.searchTerm;
-    restore.state         = std::exchange(m_tabs[index].viewState, std::nullopt);
+    restore.position      = m_tabs[index].history.takeCurrentPosition();
+    restore.search        = std::exchange(m_tabs[index].searchState, std::nullopt);
     m_recentTabIds.removeAll(tab.id);
-    if (restore.filterVisible || restore.state)
-        m_pendingTabRestore = std::move(restore);
+    if (restore.filterVisible || restore.position || restore.search)
+        m_pendingRestore = std::move(restore);
     else
-        m_pendingTabRestore.reset();
+        m_pendingRestore.reset();
 
     if (tab.history.current().isValid())
         loadUrl(tab.history.current());
@@ -1085,7 +1238,7 @@ void Panel::cancelDrag()
 void Panel::insertTab(const TabContext &ctx, bool activate)
 {
     m_tabs.append(ctx);
-    if (ctx.viewState)
+    if (ctx.history.currentPosition() || ctx.searchState)
         rememberViewState(ctx.id);
 
     const QString title = tabTitleForUrl(ctx.history.current());
@@ -1478,7 +1631,7 @@ void Panel::exitSearchMode()
         return;
     m_inSearchMode = false;
     ++m_searchSession;
-    m_pendingSearchViewState.reset();
+    m_pendingSearchPosition.reset();
     m_searchEngine->cancel();
     m_searchResultsModel->clear();
     m_searchResultCount = 0;
@@ -1844,7 +1997,7 @@ void Panel::onDirectoryLoaded(const QUrl &)
         currentView()->setFocus();
 
     applyPendingSelection();
-    applyPendingTabRestore();
+    applyPendingRestore();
 }
 
 // After a create/paste in `dir`: select `urls` (or start a rename) once they
@@ -2120,9 +2273,33 @@ void Panel::onFilterChanged(const QString &pattern)
         m_filterBar->setHint(QString());
         m_proxyModel->setFilterPattern(pattern);
         m_delegate->setHighlightText(pattern);
+        keepFilterSelection(/*revealKept=*/true);
         currentView()->viewport()->update();
         updateStatusBar();
     }
+}
+
+void Panel::keepFilterSelection(bool revealKept)
+{
+    if (m_filterBar->lineEdit()->text().isEmpty())
+        return;
+    QAbstractItemView *view = currentView();
+    QItemSelectionModel *sm = view->selectionModel();
+    if (!sm)
+        return;
+    // Rows the filter hides leave the selection by themselves, so whatever is
+    // still selected still matches.
+    if (sm->hasSelection()) {
+        const QModelIndex current = sm->currentIndex();
+        if (revealKept && current.isValid() && sm->isRowSelected(current.row(), current.parent()))
+            view->scrollTo(current);
+        return;
+    }
+    const QModelIndex first = activeModel()->index(0, 0);
+    if (!first.isValid())
+        return;
+    sm->setCurrentIndex(first, QItemSelectionModel::ClearAndSelect | QItemSelectionModel::Rows);
+    view->scrollTo(first);
 }
 
 void Panel::onFilterDismissed()
@@ -2164,7 +2341,7 @@ void Panel::startSubfolderSearch(const QString &term)
 void Panel::showCachedSearch(const QString &term, const KFileItemList &items)
 {
     // Switch to search results mode
-    m_pendingSearchViewState.reset();
+    m_pendingSearchPosition.reset();
     ++m_searchSession;
     m_searchResultsModel->clear();
     m_searchResultsModel->setSearchTerm(term);
@@ -2191,6 +2368,9 @@ void Panel::onSearchResultsBatch(const KFileItemList &items)
 {
     m_searchResultsModel->addResults(items);
     m_searchResultCount += items.size();
+    // Selects the first result once; later batches keep it (rows sort in
+    // around it, the selection follows the item).
+    keepFilterSelection(/*revealKept=*/false);
     updateStatusBar();
 }
 

@@ -40,18 +40,15 @@ class QTreeView;
 class SearchResultsModel;
 class ThumbnailLoader;
 
-// What a tab looked like when it was last left. Heavy (a selection can be a
-// whole directory's worth of URLs, search results a whole tree's), so only the
+// A tab left while showing subfolder-search results. The directory's own
+// selection and scroll live on its history entry; this is only what belongs to
+// the results. Heavy (results can be a whole tree's worth of items), so only the
 // Panel::kMaxTabsWithViewState most recently left tabs keep one.
-struct TabViewState {
-    QList<QUrl> selection;
-    QUrl        current;
-    int         scrollX = 0;
-    int         scrollY = 0;
-    // Subfolder search results, when the tab was showing them and the search
-    // had finished. An unfinished search is re-run instead.
-    bool          searchCached = false;
-    KFileItemList searchResults;
+struct TabSearchState {
+    ViewPosition position;
+    // Whether the search had finished; an unfinished one is re-run instead.
+    bool          cached = false;
+    KFileItemList results;
 };
 
 struct TabContext {
@@ -68,7 +65,8 @@ struct TabContext {
     bool    filterSubdirs = false;
     bool    filterCrossFs = false;
     QString searchTerm;
-    std::optional<TabViewState> viewState;
+    // Selection and scroll in the directory are history.currentPosition().
+    std::optional<TabSearchState> searchState;
     quint64 id = nextId(); // identity for the recently-left list; survives reordering
 
     static quint64 nextId() { static quint64 n = 0; return ++n; }
@@ -100,10 +98,11 @@ public:
     // on a row. The last column stretches into everything left of it.
     static constexpr int kTrailingDeadZone = 48;
 
-    // How many recently left tabs keep their full view state (scroll,
-    // selection, current item, search results). Older tabs keep only their
-    // filter text and search term: selections and result lists can each be a
-    // whole directory tree's worth of URLs.
+    // How many recently left tabs keep their full view state (the whole
+    // selection, search results). Older tabs keep only what any history entry
+    // keeps — the topmost selected item and scroll — plus their filter text
+    // and search term: selections and result lists can each be a whole
+    // directory tree's worth of URLs.
     static constexpr int kMaxTabsWithViewState = 5;
 
     // Details is the tree view; everything else is the QListView in IconMode.
@@ -333,15 +332,36 @@ private:
     // Records how the current tab looks (filter, search, and — for the most
     // recently left tabs — scroll, selection and results) before leaving it.
     void saveTabState(int index);
-    // Puts `id` at the front of the recently-left list, dropping the full
-    // view state of whichever tab falls off the end.
+    // Puts `id` at the front of the recently-left list, trimming the view
+    // state of whichever tab falls off the end.
     void rememberViewState(quint64 id);
     // Resets the filter bar and any search without the side effects of the
     // user doing it (no debounce, no new search).
     void resetFilterQuietly();
-    // Applied once the switched-to tab's directory has loaded.
-    void applyPendingTabRestore();
-    void applyViewState(const TabViewState &state);
+    // resetFilterQuietly() for a change of location; keeps focus in the panel.
+    void clearFilterOnNavigation();
+    // While a filter is typed: keep the selection if it still matches, else
+    // select the top row, so arrows and Enter always have something to act on.
+    // `revealKept`: scroll a kept selection into view (on typing, not when
+    // search results stream in under a user who may have scrolled away).
+    void keepFilterSelection(bool revealKept);
+    // ── Per-location view position ────────────────────────────────────────────
+    // Selection and scroll as they are now. `fullSelection` false keeps only
+    // the topmost selected item, without walking a large selection.
+    ViewPosition captureViewPosition(bool fullSelection) const;
+    // Stores the current position on the history entry about to be left.
+    void rememberPositionBeforeLeaving();
+    // After the history moved from `from`: queue what to select once the new
+    // location has loaded — the child leading back to `from` when going up,
+    // else the position stored on the entry.
+    void armPositionRestore(const QUrl &from);
+    // Applied once the directory (or switched-to tab) has loaded.
+    void applyPendingRestore();
+    // Selects `selectChild` if valid (and nothing at all if it isn't listed),
+    // else `position`'s selection; restores scroll if the view mode matches,
+    // then brings the topmost selected item into view.
+    void applyViewPosition(const std::optional<ViewPosition> &position,
+                           const QUrl &selectChild = {});
 
     // Drops `urls` from whichever model is on screen ahead of `job` (a trash or
     // delete), and restores what survives if the job fails.
@@ -536,20 +556,24 @@ private:
     // callbacks can tell they belong to a search that is no longer shown.
     int m_searchSession = 0;
 
-    // Tab ids holding a full TabViewState, most recently left first.
+    // Tab ids holding a full view state, most recently left first.
     QList<quint64> m_recentTabIds;
-    struct PendingTabRestore {
+    // What to put back once a load completes: a switched-to tab's filter,
+    // search and view, or a history entry's position.
+    struct PendingRestore {
         QUrl    url; // applied only if the load that completes is this one
         bool    filterVisible = false;
         QString filterText;
         bool    filterSubdirs = false;
         bool    filterCrossFs = false;
         QString searchTerm;
-        std::optional<TabViewState> state;
+        std::optional<ViewPosition>   position;
+        std::optional<TabSearchState> search;
+        QUrl    selectChild; // going up: the entry leading back where we came from
     };
-    std::optional<PendingTabRestore> m_pendingTabRestore;
+    std::optional<PendingRestore> m_pendingRestore;
     // Selection/scroll to apply when a re-run search finishes.
-    std::optional<TabViewState> m_pendingSearchViewState;
+    std::optional<ViewPosition> m_pendingSearchPosition;
     // Bumped per restore, so a scroll retry from an older one stands down.
     int m_restoreGeneration = 0;
 };

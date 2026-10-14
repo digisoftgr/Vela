@@ -109,6 +109,31 @@ bool FilterBar::eventFilter(QObject *watched, QEvent *event)
             Q_EMIT dismissed();
             return true;
         }
+        // The field has no use for these; the view does. Left/Right and
+        // Home/End stay with the field — they move its text cursor.
+        const bool plainOrShift =
+            (ke->modifiers() & ~(Qt::ShiftModifier | Qt::KeypadModifier)) == Qt::NoModifier;
+        switch (ke->key()) {
+        case Qt::Key_Up:
+        case Qt::Key_Down:
+        case Qt::Key_PageUp:
+        case Qt::Key_PageDown:
+            if (plainOrShift) {
+                Q_EMIT keyForView(ke);
+                return true;
+            }
+            break;
+        case Qt::Key_Return:
+        case Qt::Key_Enter:
+            // Empty: falls through to returnPressed, which dismisses the bar.
+            if (plainOrShift && !m_lineEdit->text().isEmpty()) {
+                Q_EMIT keyForView(ke);
+                return true;
+            }
+            break;
+        default:
+            break;
+        }
     }
     return QWidget::eventFilter(watched, event);
 }

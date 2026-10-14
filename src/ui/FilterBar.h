@@ -33,6 +33,9 @@ Q_SIGNALS:
     void dismissed();
     void subdirSearchToggled(bool on);
     void crossFilesystemsToggled(bool on);
+    // A key meant for the file view (arrows, page keys, Enter on a non-empty
+    // pattern): the selection moves while typing stays here.
+    void keyForView(QKeyEvent *event);
 
 private:
     QLineEdit   *m_lineEdit   = nullptr;
