@@ -128,6 +128,15 @@ Then start it with `vela`, or from the application menu.
 
 To try Vela without installing it, run `bash run.sh` after a Debug configure. The guide has the details, plus updating and uninstalling.
 
+### Updating
+
+```bash
+cd Vela
+git pull
+cmake --build build -j"$(nproc)"
+sudo cmake --install build
+```
+
 ## Optional packages
 
 - `ark`: compress and extract entries in the context menu.

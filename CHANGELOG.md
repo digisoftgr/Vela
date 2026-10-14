@@ -3,6 +3,12 @@
 All notable changes to Vela are listed here, newest first.
 Versions follow [Semantic Versioning](https://semver.org/): `MAJOR.MINOR.PATCH`.
 
+## [0.7.5] - 2026-10-14
+
+### Changed
+
+- The README shows how to update an existing installation.
+
 ## [0.7.4] - 2026-10-14
 
 ### Added
